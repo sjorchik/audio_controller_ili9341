@@ -13,7 +13,8 @@
 namespace screens_cfg {
 
 constexpr int16_t kW = display_cfg::kWidth;
-constexpr int16_t kH = display_cfg::kHeight;
+// [D1] Область екранів = верхні 320×kLegacyViewportH панелі ILI9341 320×240 (решта чорна).
+constexpr int16_t kH = display_cfg::kLegacyViewportH;
 
 // --- Загальне ---
 constexpr int16_t kMargin   = 8;                  // бічні поля

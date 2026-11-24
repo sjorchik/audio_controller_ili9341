@@ -15,15 +15,18 @@
 // ---------------------------------------------------------------------------
 // Вибір конфігурації LovyanGFX
 // ---------------------------------------------------------------------------
-// Використано власний клас-нащадок lgfx::LGFX_Device з lgfx::Panel_ST7789 +
+// Використано власний клас-нащадок lgfx::LGFX_Device з lgfx::Panel_ILI9341 +
 // lgfx::Bus_SPI — офіційний «ручний» спосіб опису пристрою. Автоконфігурації
 // (lgfx::LGFX_AutoDetect) не підходять: це самостійна плата з довільними пінами.
 // Клас Light_PWM бібліотеки НЕ використовується: підсвіткою керує сам
 // DisplayManager через ledcAttach()/ledcWrite() (правило проєкту: лише новий
 // LEDC API), а не внутрішній код бібліотеки з невідомим набором викликів LEDC.
 //
-// Буфер: 2 повнокадрові спрайти (double buffer, MASTER SPEC розділ 5) —
-// 2 × 320·170·2 ≈ 217 КБ, це ≈ 2.6 % від 8 МБ PSRAM. Відсутність мерехтіння
+// [D1] Буфер: 2 спрайти на всю панель 320×240 (double buffer, MASTER SPEC розділ 5) —
+// 2 × 320·240·2 = 307 200 Б, це ≈ 3.7 % від 8 МБ PSRAM. Екрани малюють лише у верхні
+// display_cfg::kLegacyViewportH рядків, і на панель виводяться ЛИШЕ вони (pushBuffer):
+// нижня смуга панелі очищується чорним один раз (begin() і при зміні орієнтації) і
+// далі не передається. Відсутність мерехтіння
 // забезпечує сам принцип «кадр повністю малюється в спрайт поза екраном, потім
 // одним потоком іде на панель» — вона не залежить від кількості буферів.
 // Другий буфер потрібен для перекриття: із display_cfg::kUseDma = true кадр A
@@ -48,7 +51,7 @@ public:
             cfg.spi_3wire  = false;                    // окремий MISO не потрібен (пін -1)
             cfg.use_lock   = true;
             cfg.dma_channel = SPI_DMA_CH_AUTO;
-            cfg.pin_sclk   = pins::kSt7789Sclk;
+            cfg.pin_sclk   = pins::kSt7789Sclk;        // [D1] назва пінів історична, дисплей ILI9341
             cfg.pin_mosi   = pins::kSt7789Mosi;
             cfg.pin_miso   = -1;
             cfg.pin_dc     = pins::kSt7789Dc;
@@ -61,20 +64,20 @@ public:
             cfg.pin_rst  = pins::kSt7789Rst;           // апаратний скид у init()
             cfg.pin_busy = -1;
 
-            cfg.panel_width    = display_cfg::kPanelWidth;
-            cfg.panel_height   = display_cfg::kPanelHeight;
-            cfg.memory_width   = display_cfg::kMemoryWidth;
-            cfg.memory_height  = display_cfg::kMemoryHeight;
-            // ПРИПУЩЕННЯ: див. коментар у display_config.h.
-            cfg.offset_x       = display_cfg::kOffsetX;
-            cfg.offset_y       = display_cfg::kOffsetY;
+            // ILI9341 — портретна матриця 240×320; зміщення вікна немає (offset = 0).
+            cfg.panel_width    = display_cfg::kPanelH;   // 240 (коротка сторона)
+            cfg.panel_height   = display_cfg::kPanelW;   // 320 (довга сторона)
+            cfg.memory_width   = display_cfg::kPanelH;
+            cfg.memory_height  = display_cfg::kPanelW;
+            cfg.offset_x       = 0;
+            cfg.offset_y       = 0;
             cfg.offset_rotation = 0;
 
             cfg.dummy_read_pixel = 8;
             cfg.dummy_read_bits  = 1;
             cfg.readable   = false;                    // MISO не підключений
-            cfg.invert     = display_cfg::kInvertColors;
-            cfg.rgb_order  = display_cfg::kBgrOrder;
+            cfg.invert     = display_cfg::kInvert;
+            cfg.rgb_order  = display_cfg::kRgbOrder;
             cfg.dlen_16bit = false;
             cfg.bus_shared = false;
             _panel.config(cfg);
@@ -83,7 +86,7 @@ public:
     }
 
 private:
-    lgfx::Panel_ST7789 _panel;
+    lgfx::Panel_ILI9341 _panel;
     lgfx::Bus_SPI      _bus;
 };
 
@@ -93,6 +96,15 @@ lgfx::LGFX_Sprite s_spr1(&s_lcd);
 lgfx::LGFX_Sprite* const s_bufs[display_cfg::kBufferCount] = {&s_spr0, &s_spr1};
 
 static_assert(display_cfg::kBufferCount == 2, "double buffering expects exactly 2 buffers");
+
+// Скільки верхніх рядків спрайта малюється й виводиться на панель щокадру.
+// Звичайна робота — лише область екранів; у DISPLAY_DEMO — вся панель 320×240.
+#if DISPLAY_DEMO
+constexpr int16_t kDrawH = display_cfg::kPanelH;
+#else
+constexpr int16_t kDrawH = display_cfg::kLegacyViewportH;
+#endif
+static_assert(kDrawH > 0 && kDrawH <= display_cfg::kPanelH, "draw height must fit into the panel");
 
 // ---------------------------------------------------------------------------
 // Стан
@@ -151,6 +163,10 @@ bool applyRotation() {
         s_lcd.waitDMA();
     }
     s_lcd.setRotation(rotationFor(want));
+    // Після повороту «невикористана» смуга панелі стає іншою фізичною смугою: стара
+    // картинка в ній лишилась би сміттям. Чистимо всю панель; вміст області
+    // екранів зараз повторно виведе taskLoop.
+    s_lcd.fillScreen(display_cfg::kColorBlack);
     s_flipApplied = want;
     Serial.printf("%s rotation %u (%s)\n", kTag, static_cast<unsigned>(rotationFor(want)),
                   want ? "flipped 180" : "normal");
@@ -169,15 +185,16 @@ lgfx::LGFX_Sprite& backBuffer() {
 
 void pushBuffer(uint8_t idx) {
     lgfx::LGFX_Sprite* spr = s_bufs[idx];
+    // Рядки спрайта йдуть підряд, тож перші kDrawH рядків — це початок буфера.
+    // Спрайт RGB565 зберігає байти вже в порядку шини, тому тип swap565_t.
+    const auto* data = reinterpret_cast<const lgfx::swap565_t*>(spr->getBuffer());
+    s_lcd.startWrite();
     if (display_cfg::kUseDma) {
-        // Спрайт RGB565 зберігає байти вже в порядку шини, тому тип swap565_t.
-        s_lcd.startWrite();
-        s_lcd.pushImageDMA(0, 0, display_cfg::kWidth, display_cfg::kHeight,
-                           reinterpret_cast<const lgfx::swap565_t*>(spr->getBuffer()));
-        s_lcd.endWrite();
+        s_lcd.pushImageDMA(0, 0, display_cfg::kWidth, kDrawH, data);
     } else {
-        spr->pushSprite(&s_lcd, 0, 0);
+        s_lcd.pushImage(0, 0, display_cfg::kWidth, kDrawH, data);
     }
+    s_lcd.endWrite();
 }
 
 void taskEntry(void*) {
@@ -186,62 +203,70 @@ void taskEntry(void*) {
 }
 
 #if DISPLAY_DEMO
-// Статичний тестовий кадр. Малює лише через публічні примітиви DisplayManager.
+// Статичний тестовий кадр на ВСІЙ панелі 320×240. Малює лише через публічні примітиви
+// DisplayManager. Екрани (UiScreens) у цьому режимі не викликаються (див. taskLoop).
 void drawDemoFrame() {
     using namespace display_cfg;
     namespace d = display_cfg::demo;
 
     DisplayManager::fillScreen(kColorBg);
 
-    // Рамка по краю: при неправильному зміщенні вікна якась сторона зникне,
-    // а поруч зʼявиться смуга «шуму» з неініціалізованої памʼяті панелі.
+    // Рамка по краях ВСІЄЇ панелі 320×240: якщо якась сторона не видна — неправильні
+    // розміри / зміщення вікна; поруч не має бути смуги «шуму».
     for (int16_t i = 0; i < d::kFrameThickness; ++i) {
-        DisplayManager::drawRect(i, i, kWidth - 2 * i, kHeight - 2 * i, kColorWhite);
+        DisplayManager::drawRect(i, i, kPanelW - 2 * i, kPanelH - 2 * i, kColorWhite);
     }
 
-    // Кольорові кути: лівий верхній червоний, правий верхній зелений,
-    // лівий нижній синій, правий нижній жовтий (перевірка орієнтації й RGB/BGR).
-    const int16_t lo = d::kCornerInset;
-    const int16_t hiX = kWidth - d::kCornerInset - d::kCornerSize;
-    const int16_t hiY = kHeight - d::kCornerInset - d::kCornerSize;
+    // Кольорові кути: лівий верхній червоний, правий верхній зелений, лівий нижній
+    // синій, правий нижній жовтий (перевірка орієнтації: kRotation / setFlipped).
+    const int16_t lo  = d::kCornerInset;
+    const int16_t hiX = kPanelW - d::kCornerInset - d::kCornerSize;
+    const int16_t hiY = kPanelH - d::kCornerInset - d::kCornerSize;
     DisplayManager::fillRect(lo,  lo,  d::kCornerSize, d::kCornerSize, kColorRed);
     DisplayManager::fillRect(hiX, lo,  d::kCornerSize, d::kCornerSize, kColorGreen);
     DisplayManager::fillRect(lo,  hiY, d::kCornerSize, d::kCornerSize, kColorBlue);
     DisplayManager::fillRect(hiX, hiY, d::kCornerSize, d::kCornerSize, kColorYellow);
 
-    // Проблемні літери великим шрифтом і меншим.
-    DisplayManager::drawText("Ґрунт Їжачок Єдність", d::kTextX, d::kTitleY,
-                             FontSize::Large, kColorYellow);
-    DisplayManager::drawText("Ґанок, їжак, єнот, ялинка, щастя", d::kTextX, d::kSubtitleY,
-                             FontSize::Small, kColorWhite);
-
-    // Повний алфавіт (33 + 33 літери) розміром Tiny: відсутні гліфи видно одразу.
-    DisplayManager::drawText("АБВГҐДЕЄЖЗИІЇЙКЛМНОПРСТУФХЦЧШЩЬЮЯ", d::kTextX, d::kAlphaUpperY,
-                             FontSize::Tiny, kColorGray);
-    DisplayManager::drawText("абвгґдеєжзиіїйклмнопрстуфхцчшщьюя", d::kTextX, d::kAlphaLowerY,
-                             FontSize::Tiny, kColorGray);
-
-    // Усі іконки в ряд із підписами по центру комірки.
-    for (uint8_t i = 0; i < UiIcons::kCount; ++i) {
-        const IconId id = UiIcons::fromIndex(i);
-        const int16_t slotX = d::kTextX + static_cast<int16_t>(i) * d::kIconSlotW;
-        DisplayManager::drawIcon(id, slotX + (d::kIconSlotW - kIconSize) / 2, d::kIconRowY,
-                                 kColorWhite);
-
-        const char* label = UiIcons::name(id);
-        const int16_t w = static_cast<int16_t>(UiFonts::textWidth(label, FontSize::Tiny));
-        DisplayManager::drawText(label, slotX + (d::kIconSlotW - w) / 2, d::kCaptionY,
+    // П'ять смуг зліва направо: R, G, B, білий, чорний (з сірим контуром, щоб було видно).
+    const uint16_t barColors[d::kBarCount] = {kColorRed, kColorGreen, kColorBlue,
+                                               kColorWhite, kColorBlack};
+    const char* barNames[d::kBarCount] = {"R", "G", "B", "W", "K"};
+    for (int16_t i = 0; i < d::kBarCount; ++i) {
+        const int16_t x = d::kBarsX + i * d::kBarW;
+        DisplayManager::fillRect(x, d::kBarsY, d::kBarW, d::kBarH, barColors[i]);
+        if (barColors[i] == kColorBlack) {
+            DisplayManager::drawRect(x, d::kBarsY, d::kBarW, d::kBarH, kColorGray);
+        }
+        const int16_t w = static_cast<int16_t>(UiFonts::textWidth(barNames[i], FontSize::Tiny));
+        DisplayManager::drawText(barNames[i], x + (d::kBarW - w) / 2, d::kLabelY,
                                  FontSize::Tiny, kColorGray);
     }
 
+    // Перевірка шрифту з проблемними літерами.
+    DisplayManager::drawText("Ґрунт Їжачок Єдність", d::kTextX, d::kTitleY,
+                             FontSize::Large, kColorYellow);
+
+    // Межа області екранів (kLegacyViewportH): подвійна жовта лінія по всій ширині.
+    DisplayManager::drawLine(0, kLegacyViewportH - 1, kPanelW - 1, kLegacyViewportH - 1,
+                             kColorYellow);
+    DisplayManager::drawLine(0, kLegacyViewportH, kPanelW - 1, kLegacyViewportH, kColorYellow);
+
     // Параметри панелі, з якими зібрано прошивку.
-    char info[64];
-    snprintf(info, sizeof(info), "off=%d,%d rot=%u spi=%luMHz dma=%d inv=%d bgr=%d",
-             static_cast<int>(kOffsetX), static_cast<int>(kOffsetY),
+    char info[72];
+    snprintf(info, sizeof(info), "ILI9341 %dx%d rot=%u spi=%luMHz dma=%d inv=%d rgb=%d",
+             static_cast<int>(kPanelW), static_cast<int>(kPanelH),
              static_cast<unsigned>(rotationFor(s_flipApplied)),
              static_cast<unsigned long>(kSpiWriteHz / 1000000UL),
-             kUseDma ? 1 : 0, kInvertColors ? 1 : 0, kBgrOrder ? 1 : 0);
+             kUseDma ? 1 : 0, kInvert ? 1 : 0, kRgbOrder ? 1 : 0);
     DisplayManager::drawText(info, d::kTextX, d::kInfoY, FontSize::Tiny, kColorGray);
+
+    char hint[48];
+    snprintf(hint, sizeof(hint), "yellow line: legacy viewport edge, y=%d",
+             static_cast<int>(kLegacyViewportH));
+    DisplayManager::drawText(hint, d::kTextX, d::kHintY, FontSize::Tiny, kColorYellow);
+
+    DisplayManager::drawText("below the line: unused area (black in normal mode)", d::kTextX,
+                             d::kBelowY, FontSize::Tiny, kColorGray);
 }
 #endif  // DISPLAY_DEMO
 
@@ -291,14 +316,15 @@ bool DisplayManager::begin() {
     }
     s_flipApplied = s_flipRequested;
     s_lcd.setRotation(rotationFor(s_flipApplied));
-    if (s_lcd.width() != display_cfg::kWidth || s_lcd.height() != display_cfg::kHeight) {
+    if (s_lcd.width() != display_cfg::kPanelW || s_lcd.height() != display_cfg::kPanelH) {
         s_error = DisplayError::PanelInitFailed;
-        Serial.printf("%s panel size %dx%d, expected %dx%d (check kRotationNormal)\n", kTag,
+        Serial.printf("%s panel size %dx%d, expected %dx%d (check kRotation)\n", kTag,
                       static_cast<int>(s_lcd.width()), static_cast<int>(s_lcd.height()),
-                      static_cast<int>(display_cfg::kWidth),
-                      static_cast<int>(display_cfg::kHeight));
+                      static_cast<int>(display_cfg::kPanelW),
+                      static_cast<int>(display_cfg::kPanelH));
         return false;
     }
+    // Уся панель 320×240 чорна ОДИН раз: нижню смугу далі не передаємо (див. pushBuffer).
     s_lcd.fillScreen(display_cfg::kColorBlack);
 
     // 5. Буфери кадру в PSRAM.
@@ -306,18 +332,19 @@ bool DisplayManager::begin() {
     for (auto* spr : s_bufs) {
         spr->setPsram(true);
         spr->setColorDepth(16);
-        if (!spr->createSprite(display_cfg::kWidth, display_cfg::kHeight) ||
+        if (!spr->createSprite(display_cfg::kPanelW, display_cfg::kPanelH) ||
             spr->getBuffer() == nullptr || !esp_ptr_external_ram(spr->getBuffer())) {
             s_error = DisplayError::SpriteAllocFailed;
             Serial.printf("%s frame buffer alloc in PSRAM failed\n", kTag);
             releaseSprites();
             return false;
         }
+        spr->fillScreen(display_cfg::kColorBlack);  // нижня смуга спрайта чорна й не змінюється
     }
     Serial.printf("%s buffers: %u x %ux%u RGB565 in PSRAM (%u bytes used)\n", kTag,
                   static_cast<unsigned>(display_cfg::kBufferCount),
-                  static_cast<unsigned>(display_cfg::kWidth),
-                  static_cast<unsigned>(display_cfg::kHeight),
+                  static_cast<unsigned>(display_cfg::kPanelW),
+                  static_cast<unsigned>(display_cfg::kPanelH),
                   static_cast<unsigned>(psramBefore - ESP.getFreePsram()));
 
     // 6. Задача малювання.
@@ -335,7 +362,9 @@ bool DisplayManager::begin() {
     }
 
     s_error = DisplayError::None;
-    Serial.printf("%s ready: %dx%d, spi=%luMHz, frame=%lums, core=%d prio=%u\n", kTag,
+    Serial.printf("%s ready: ILI9341 %dx%d, screens %dx%d, spi=%luMHz, frame=%lums, core=%d prio=%u\n",
+                  kTag, static_cast<int>(display_cfg::kPanelW),
+                  static_cast<int>(display_cfg::kPanelH),
                   static_cast<int>(display_cfg::kWidth), static_cast<int>(display_cfg::kHeight),
                   static_cast<unsigned long>(display_cfg::kSpiWriteHz / 1000000UL),
                   static_cast<unsigned long>(display_cfg::kFramePeriodMs),
@@ -361,7 +390,11 @@ void DisplayManager::taskLoop() {
         // (він у «передньому» буфері s_back^1, після present() не міняється).
         const bool rotated = applyRotation();
 
+#if DISPLAY_DEMO
+        FrameCallback cb = nullptr;  // тестовий кадр статичний: екрани його б затерли
+#else
         FrameCallback cb = s_frameCb;
+#endif
         if (cb != nullptr && cb()) {
             present();
         } else if (rotated) {
@@ -434,7 +467,9 @@ int16_t DisplayManager::height() {
 
 void DisplayManager::fillScreen(uint16_t color) {
     if (!s_ready) return;
-    backBuffer().fillScreen(color);
+    // Лише область, що виводиться на панель (kDrawH рядків); нижня смуга спрайта чорна
+    // з begin() і не перемальовується щокадру.
+    backBuffer().fillRect(0, 0, display_cfg::kWidth, kDrawH, color);
 }
 
 void DisplayManager::fillRect(int16_t x, int16_t y, int16_t w, int16_t h, uint16_t color) {

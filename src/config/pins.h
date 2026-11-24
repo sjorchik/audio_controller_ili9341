@@ -9,7 +9,8 @@
 
 namespace pins {
 
-// --- ST7789 (SPI2 / FSPI) ---
+// --- Дисплей ILI9341 320×240 (SPI2 / FSPI; без MISO і тачскріна) ---
+// [D1] Назви kSt7789* збережено (історичні, на них посилається код); значення пінів не змінено.
 constexpr int kSt7789Sclk = 12;
 constexpr int kSt7789Mosi = 11;
 constexpr int kSt7789Cs   = 10;
