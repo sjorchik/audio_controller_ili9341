@@ -52,6 +52,7 @@
 #include "core/events.h"
 #include "core/settings.h"       // [Prompt 6] ДОДАНО
 #include "core/settings_test.h"  // [Prompt 6] ДОДАНО
+#include "core/time_service.h"  // [S2a] ДОДАНО
 #include "input/buttons.h"
 #include "input/encoder.h"
 #include "input/ir_rc5.h"  // [Prompt 2] ДОДАНО
@@ -245,6 +246,14 @@ static void initWifi(bool forceReset) {
     }
 }
 
+// [S2a] ДОДАНО: сервіс часу (SNTP + Київ). begin() лише підписується на подію Wi-Fi
+// і сам стартує SNTP, коли STA отримає IP; блокувань немає.
+static void initTime() {
+    if (!TimeService::begin()) {
+        Serial.println("[MAIN] Time service init failed");
+    }
+}
+
 // [Prompt 8] ДОДАНО: AppController. Останній з модулів, від яких він залежить
 // (EventBus, Settings, input_selector, плеєр, line_path). [P48a] begin() без параметрів.
 static void initAppController() {
@@ -387,6 +396,9 @@ void setup() {
     // [Prompt 12] ДОДАНО: Wi-Fi після плеєра, але до AppController, щоб перший
     // синхронізований стан AppController уже бачив Connecting/AP.
     initWifi(wifiResetRequested);
+
+    // [S2a] ДОДАНО: сервіс часу після Wi-Fi.
+    initTime();
 
     // [Prompt 44] ДОДАНО. [Prompt 47c] ПЕРЕНЕСЕНО ПЕРЕД AppController: begin() проходу має відбутись до першого
     // powerOnTransition() контролера (стартує на зовнішньому вході й одразу керує LinePath).
