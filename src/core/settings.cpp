@@ -1,5 +1,7 @@
 // Реалізація SettingsStore: один blob у NVS з версією формату, кеш у RAM,
 // відкладений запис з дебаунсом у власній легкій задачі.
+// [D2a] Формат v11: 4 логічні входи (0 радіо, 1 Computer, 2 Aux, 3 Плеєр): inputNames[4], profiles[4]; профіль входу без змін
+// (13 Б); Settings 190 Б, blob 194 Б. БЕЗ МІГРАЦІЇ з v10 (прошивка на СТЕРТИЙ flash: `pio run -t erase`).
 // [E4] Формат v10: профіль входу = {volume, eqGainsDb[eq_cfg::kBandCount = 10], balanceDb, vuSensDb} = 13 Б; у кінець Settings
 // додано eqBandSet (id набору частот EQ); Settings 144 Б, blob 148 Б. БЕЗ МІГРАЦІЇ з v9 (прошивка на СТЕРТИЙ flash).
 // При завантаженні id ≠ eq_cfg::kBandSetId -> усі пресети EQ = 0 дБ (settings_eq_set::reconcile), id оновлюється й зберігається.
@@ -50,20 +52,20 @@ static_assert(sizeof(Settings::inputNames) / sizeof(Settings::inputNames[0]) ==
 static_assert(sizeof(StoredBlob) <= 1024, "keep the blob small");
 
 // ---------------------------------------------------------------------------
-// Перевірки розкладки (формат v10)
+// Перевірки розкладки (формат v11)
 // ---------------------------------------------------------------------------
-// [E4] Розмір профілю залежить від eq_cfg::kBandCount (10 смуг): InputProfile 13 Б, Settings 144 Б, blob 148 Б.
-// (v9, 8 смуг: 11 / 138 / 142 Б.)
+// [D2a] 4 входи, 10 смуг EQ: InputProfile 13 Б, Settings 190 Б (189 + 1 Б вирівнювання до 2), blob 194 Б.
+// (v10, 3 входи: 13 / 144 / 148 Б; v9, 8 смуг: 11 / 138 / 142 Б.)
 // Числа Settings / blob — вручну (як і раніше): зміна kBandCount ЗРУШИТЬ їх і зупинить збірку (разом із
 // settings_cfg::kFormatVersion, який тоді теж треба піднімати).
-static_assert(settings_cfg::kFormatVersion == 10,
-              "format v10 (10 EQ bands + eqBandSet): bump settings_cfg::kFormatVersion to 10 in config/settings_config.h");
-static_assert(eq_cfg::kBandCount == 10, "format v10 is laid out for 10 EQ bands (change the sizes below and kFormatVersion together)");
-static_assert(defaults::kInputCount == 3, "format v10 is laid out for 3 logical inputs (radio + TV Box + Computer)");
+static_assert(settings_cfg::kFormatVersion == 11,
+              "format v11 (4 inputs, 10 EQ bands + eqBandSet): bump settings_cfg::kFormatVersion to 11 in config/settings_config.h");
+static_assert(eq_cfg::kBandCount == 10, "format v11 is laid out for 10 EQ bands (change the sizes below and kFormatVersion together)");
+static_assert(defaults::kInputCount == 4, "format v11 is laid out for 4 logical inputs (radio + Computer + Aux + Player)");
 static_assert(sizeof(InputProfile) == 1 + eq_cfg::kBandCount + 1 + 1,
               "InputProfile = volume + EQ bands + balanceDb + vuSensDb, no padding");
-static_assert(sizeof(Settings) == 144, "Settings v10 is 144 bytes (v9 was 138)");
-static_assert(sizeof(StoredBlob) == 148, "v10 blob is 148 bytes (v9 was 142; differs from the earlier formats)");
+static_assert(sizeof(Settings) == 190, "Settings v11 is 190 bytes (v10 was 144)");
+static_assert(sizeof(StoredBlob) == 194, "v11 blob is 194 bytes (v10 was 148; differs from the earlier formats)");
 static_assert(defaults::kInputCount >= 1, "profiles[0] (radio) must exist");
 
 
@@ -130,7 +132,7 @@ void fillDefaults(Settings& s) {
         p.balanceDb = balance_cfg::kDefaultDb;
         p.vuSensDb = vu_sens_cfg::kDefaultDb;  // [V1]
     }
-    // [Prompt 48a] Усі три входи дозволені (0x07).
+    // [D2a] Усі чотири входи дозволені (0x0F).
     s.inputEnabledMask = settings_cfg::kInputMaskDefault;
     // [E4] Пресети плоскі, тож вони «належать» поточному набору частот.
     s.eqBandSet = eq_cfg::kBandSetId;
@@ -300,8 +302,8 @@ bool SettingsStore::load() {
             Serial.printf("[SET] stored size %u unsupported, using defaults\n",
                           static_cast<unsigned>(len));
         } else {
-            // [Prompt 48a / V1 / E2a / E4] Приймаємо ЛИШЕ поточний формат v10 (версія + довжина + payload). Будь-який
-            // інший blob (старі версії v1..v9, чужа довжина) не мігрується: значення за замовчуванням.
+            // [Prompt 48a / V1 / E2a / E4 / D2a] Приймаємо ЛИШЕ поточний формат v11 (версія + довжина + payload). Будь-який
+            // інший blob (старі версії v1..v10, чужа довжина) не мігрується: значення за замовчуванням.
             alignas(4) uint8_t raw[sizeof(StoredBlob)];
             memset(raw, 0, sizeof(raw));
             const size_t got = prefs.getBytes(settings_cfg::kNvsBlobKey, raw, len);
@@ -454,4 +456,3 @@ bool SettingsStore::eraseStored() {
 uint32_t SettingsStore::writeCount() {
     return s_writeCount;
 }
-

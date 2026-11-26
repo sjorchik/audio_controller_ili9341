@@ -226,6 +226,7 @@
 #include "core/settings.h"
 #include "input/ir_rc5.h"            // [Prompt 15] ДОДАНО
 #include "net/wifi_manager.h"       // [Prompt 12] ДОДАНО
+#include "config/inputs_config.h"    // [D2a] inputs_cfg::usesLinePath(): 1 = Computer, 2 = Aux через line_path; 3 = Плеєр без проходу
 // [Prompt 25] Рівень виходу декодера по станціях (Station::levelDb). startStream() — ЄДИНЕ місце
 // запуску потоку (старт, standby, вибір зі списку, LEFT/RIGHT, веб StationPlay, відкладений
 // старт без Wi-Fi, зміна входу): воно виставляє рівень станції через
@@ -1417,7 +1418,7 @@ bool lineResourcesPresent() {
 
 // Пресет EQ входу idx (Settings::profiles) -> екземпляр EQ проходу.
 void lineApplyEq(uint8_t idx) {
-    if (idx == 0 || idx >= defaults::kInputCount || !LinePath::isReady()) {
+    if (!inputs_cfg::usesLinePath(idx) || !LinePath::isReady()) {  // [D2a] радіо (0) і Плеєр (3) — не прохід
         return;
     }
     const Settings st = SettingsStore::snapshot();
@@ -1497,7 +1498,7 @@ void lineReleaseDone(uint32_t now) {
     if (logicallyStandby() || s_mode == Mode::OtaUpdate || restarting()) {
         return;  // тиша; новий старт — при виході зі standby / невдачі OTA
     }
-    if (s_input != 0) {
+    if (inputs_cfg::usesLinePath(s_input)) {  // [D2a] було s_input != 0: Плеєр (3) проходу не потребує
         if (after == LineAfter::Fail) {
             lineSetState(LineState::Failed);
             APP_LOG("line: giving up, silent until the input is selected again\n");
@@ -1514,6 +1515,9 @@ void lineReleaseDone(uint32_t now) {
         }
         lineSetState(LineState::Starting);
         return;
+    }
+    if (s_input != 0) {
+        return;  // [D2a] Плеєр (3): ресурси проходу звільнено, звук мовчить (радіо не стартуємо)
     }
     // Вхід — радіо: RAM проходу вже звільнена, стартуємо потік. Settle перезапускаємо: радіо до розмʼюту в мʼюті.
     startTransition();
@@ -1655,6 +1659,24 @@ void routeInput() {
         }
         return;
     }
+    if (!inputs_cfg::usesLinePath(s_input)) {
+        // [D2a] Плеєр (3): заглушка. Прохід не запускаємо, радіо не стартуємо, реле не чіпаємо: вихід у тиші.
+        // Якщо прохід був активним (Computer / Aux -> Плеєр) — звільняємо його; lineReleaseDone() далі нічого не стартує.
+        switch (s_lineState) {
+            case LineState::Off:
+            case LineState::Failed:
+                lineSetState(LineState::Off);
+                break;
+            case LineState::Releasing:
+                s_lineAfter = LineAfter::Auto;
+                break;
+            default:
+                s_lineAfter = LineAfter::Auto;
+                lineBeginRelease();  // мʼют -> returnToRadio() -> тиша (lineReleaseDone)
+                break;
+        }
+        return;
+    }
     switch (s_lineState) {
         case LineState::Off:
         case LineState::Failed:
@@ -1680,7 +1702,7 @@ void routeInput() {
 
 // Вхід<->вхід не потребує Phase::Settle (аналогового чипа/підсилювача на цьому шляху немає).
 inline bool lineSkipsSettle(uint8_t prev, uint8_t next) {
-    return prev != 0 && next != 0;
+    return inputs_cfg::usesLinePath(prev) && inputs_cfg::usesLinePath(next);  // [D2a] було prev != 0 && next != 0
 }
 #else  // LINE_PATH_ENABLE == 0: зовнішні входи мовчать, радіо як у P47a
 inline bool lineBusy() { return false; }
@@ -1836,7 +1858,7 @@ void changeInput(uint8_t newIdx) {
 }
 
 void stepInput(int dir) {
-    const int count = defaults::kInputCount;  // [P48a] 3 логічні входи; вимкнені маскою пропускаються
+    const int count = defaults::kInputCount;  // [D2a] 4 логічні входи (радіо, Computer, Aux, Плеєр); вимкнені маскою пропускаються
     // [Prompt 28] Недоступні входи (в офлайні — радіо) пропускаються. Без офлайну перший же
     // крок доступний, тож поведінка не змінилась.
     int n = s_input;
@@ -2083,9 +2105,9 @@ void handleEqEvent(const Event& e) {
             adjustParam(AdjustTarget::Volume, -1);
             eqTouch();
             break;
-        case Action::INPUT_RADIO: if (plain) selectInput(0); break;
-        case Action::INPUT_TV:    if (plain) selectInput(1); break;
-        case Action::INPUT_PC:    if (plain) selectInput(2); break;
+        case Action::INPUT_RADIO: if (plain) selectInput(inputs_cfg::kRadio); break;
+        case Action::INPUT_TV:    break;  // [D2a] входу TV Box немає: дія лишається в enum (мапа IR), без дії
+        case Action::INPUT_PC:    if (plain) selectInput(inputs_cfg::kComputer); break;
         default:
             break;  // решта дій у екрані ігнорується
     }
@@ -2122,11 +2144,13 @@ void handleMainEvent(const Event& e) {
             break;
         case Action::ENC_CW:  adjustParam(AdjustTarget::Volume, +step); break;   // [Prompt 49a] завжди гучність
         case Action::ENC_CCW: adjustParam(AdjustTarget::Volume, -step); break;
-        case Action::INPUT_RADIO: if (plain) selectInput(0); break;
-        case Action::INPUT_TV:    if (plain) selectInput(1); break;
-        case Action::INPUT_PC:    if (plain) selectInput(2); break;
-        case Action::INPUT_AUX:   // [P48a] входу AUX немає: дія лишається в enum (мапа IR), без дії
-            if (plain) APP_LOG("INPUT_AUX ignored (no such input)\n");
+        case Action::INPUT_RADIO: if (plain) selectInput(inputs_cfg::kRadio); break;
+        case Action::INPUT_TV:    // [D2a] входу TV Box немає: дія лишається в enum (мапа IR), без дії
+            if (plain) APP_LOG("INPUT_TV ignored (no such input)\n");
+            break;
+        case Action::INPUT_PC:    if (plain) selectInput(inputs_cfg::kComputer); break;
+        case Action::INPUT_AUX:   // [D2a] Aux з пульта поки недоступний (дія не навчається): без дії
+            if (plain) APP_LOG("INPUT_AUX ignored (not mapped on remote)\n");
             break;
         default:
             APP_LOG("event ignored (not in Prompt 8 scope)\n");
@@ -2792,7 +2816,7 @@ WebCmdResult execWebCommandLocked(const WebCommand& c, const char*& why) {
 
         case WebCmdType::InputSet:
             if (c.value < 0 || c.value >= defaults::kInputCount) {
-                why = "input_unavailable";  // поза 0..2
+                why = "input_unavailable";  // поза 0..kInputCount-1 (0..3)
                 return WebCmdResult::OutOfRange;
             }
             // [Prompt 39] Вхід вимкнено користувачем (маска) — не помилка значення, а стан
@@ -3088,7 +3112,7 @@ bool AppController::applyLineEq(uint8_t input, const int8_t gains[eq_cfg::kBandC
         xSemaphoreTakeRecursive(s_lock, pdMS_TO_TICKS(cfg::kLockTimeoutMs)) != pdTRUE) {
         return false;
     }
-    if (input != 0 && input == s_input && LinePath::isReady()) {
+    if (inputs_cfg::usesLinePath(input) && input == s_input && LinePath::isReady()) {  // [D2a] Плеєр (3) — не прохід
         LinePath::setEqAllDb(gains);  // неблокуюче; діє й до старту проходу
         APP_LOG("line EQ preset applied live (input %u)\n", static_cast<unsigned>(input));
     }
@@ -3164,7 +3188,7 @@ bool AppController::begin() {
 
     if (cfg::kBootInStandby || coldStart) {
         APP_LOG("boot in standby\n");
-        // [Prompt 48a] Реле не чіпаємо (лишається в TV Box після input_selector::begin()), тиша: профіль
+        // [Prompt 48a / D2a] Реле не чіпаємо (лишається в Computer після input_selector::begin()), тиша: профіль
         // входу застосується повністю при виході зі standby.
     } else {
         powerOnTransition();  // режим, реле / старт проходу + профіль, playUrl для Radio, розмʼют у tick()

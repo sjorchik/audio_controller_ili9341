@@ -20,6 +20,8 @@
 // [Prompt 48a] NVS blob v7 (БЕЗ міграції): ВИДАЛЕНО processorType (аудіочіпи TDA7318 / PT2313L вирізано);
 // 3 логічні входи (inputNames[3], profiles[3]: 0 радіо, 1 TV Box, 2 Computer); профіль входу +balanceDb
 // (баланс ±20 дБ, крок 1 дБ, діапазон — config/balance_config.h; у P48a лише зберігається, DSP — P48b).
+// [D2a] NVS blob v11 (БЕЗ міграції): 4 логічні входи (0 радіо, 1 Computer, 2 Aux, 3 Плеєр); профіль входу без змін
+// (13 Б); Settings 190 Б, blob 194 Б.
 // [E4] NVS blob v10 (БЕЗ міграції): профіль входу з eq_cfg::kBandCount = 10 смугами; у КІНЕЦЬ Settings додано eqBandSet
 // (id набору частот EQ, eq_cfg::kBandSetId = EQ_BAND_SET). Settings 144 Б, blob 148 Б.
 // [Prompt 39] У КІНЕЦЬ структури додано inputEnabledMask (маска дозволених входів, відключення
@@ -53,7 +55,7 @@ struct InputProfile {
 struct Settings {
     // [Prompt 48a] Поле processorType ВИДАЛЕНО (аудіочіпи вирізано).
 
-    // Назви входів (кількість = defaults::kInputCount = 3: 0 радіо, 1 TV Box, 2 Computer) [Prompt 48a].
+    // Назви входів (кількість = defaults::kInputCount = 4: 0 радіо, 1 Computer, 2 Aux, 3 Плеєр) [D2a].
     char inputNames[defaults::kInputCount][32];
 
     // Яскравість підсвітки дисплея (та сама шкала, що defaults::kDefaultBrightness).
@@ -74,8 +76,8 @@ struct Settings {
     // (profiles[0].eqGainsDb): load(), resetToDefaults(), /api/eq, повернення на вхід 0 (AppController).
     InputProfile profiles[defaults::kInputCount];
 
-    // [Prompt 39] Маска дозволених логічних входів: біт i = вхід i (0 = радіо, 1 = TV Box, 2 = Computer),
-    // 1 = дозволено. [P48a] За замовчуванням 0x07 (settings_cfg::kInputMaskDefault). Біт 0 ЗАВЖДИ 1:
+    // [Prompt 39] Маска дозволених логічних входів: біт i = вхід i (0 = радіо, 1 = Computer, 2 = Aux, 3 = Плеєр),
+    // 1 = дозволено. [D2a] За замовчуванням 0x0F (settings_cfg::kInputMaskDefault). Біт 0 ЗАВЖДИ 1:
     // нормалізується в load()/sanitize() і в AppController (settings_cfg::normalizeInputMask). Пише лише
     // AppController (команда вебу WebCmdType::InputsEnabledSet). Поле стоїть ПІСЛЯ profiles.
     uint8_t inputEnabledMask;
@@ -146,4 +148,3 @@ public:
     // [Prompt 6] ДОДАНО: скільки разів реально писали в NVS з моменту старту.
     static uint32_t writeCount();
 };
-

@@ -16,16 +16,18 @@ constexpr uint32_t kSerialBaud = 115200;
 constexpr int8_t kDefaultVolume  = 40;
 constexpr bool   kDefaultMute    = false;
 
-// [Prompt 48a] Логічні входи (3): 0 = WiFi Radio (цифровий шлях, реле НЕ задіяне), 1 = TV Box,
-// 2 = Computer. Входи 1 / 2 комутує одне реле (audio/input_selector: вимкнено = TV Box, увімкнено =
-// Computer). Bluetooth і AUX ВИДАЛЕНО. Назви редагуються у вебі; тут — типові. Усі три входи
-// дозволені за замовчуванням (settings_cfg::kInputMaskDefault = 0x07).
+// [D2a] НОВИЙ ПРИСТРІЙ: логічні входи (4): 0 = WiFi Radio (цифровий шлях, реле НЕ задіяне), 1 = Computer,
+// 2 = Aux, 3 = Player (заглушка до інтеграції media-модуля: без line_path, реле НЕ задіяне, тиша).
+// Входи 1 / 2 комутує одне реле (audio/input_selector: вимкнено = Computer, увімкнено = Aux).
+// Індекси й клас входу — config/inputs_config.h. Назви редагуються у вебі; тут — типові. Усі чотири входи
+// дозволені за замовчуванням (settings_cfg::kInputMaskDefault = 0x0F).
 constexpr uint8_t kDefaultInput = 0;
-constexpr uint8_t kInputCount = 3;
+constexpr uint8_t kInputCount = 4;
 constexpr const char* kInputNames[kInputCount] = {
     "WiFi Radio",
-    "TV Box",
     "Computer",
+    "Aux",
+    "Player",
 };
 
 // --- Дисплей ---

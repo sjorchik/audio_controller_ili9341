@@ -49,18 +49,21 @@ constexpr const char* kNvsBlobKey   = "settings";
 // [E4] 9 -> 10: профіль входу з eq_cfg::kBandCount = 10 смугами (13 Б), у кінець Settings додано eqBandSet (id набору
 // частот EQ, uint8). Settings 138 -> 144 Б, blob 142 -> 148 Б. БЕЗ МІГРАЦІЇ (blob v9 / 142 Б відхиляється з логом, діють
 // дефолти; прошивка — на СТЕРТИЙ flash: `pio run -t erase`). Зміна EQ_BAND_SET формат НЕ змінює (розмір той самий).
-constexpr uint8_t kFormatVersion = 10;
+// [D2a] 10 -> 11: 4 логічні входи (defaults::kInputCount = 4: радіо, Computer, Aux, Плеєр): inputNames[4], profiles[4].
+// Профіль входу без змін (13 Б). Settings 144 -> 190 Б, blob 148 -> 194 Б. БЕЗ МІГРАЦІЇ (blob v10 / 148 Б відхиляється з логом,
+// діють дефолти; прошивка — на СТЕРТИЙ flash: `pio run -t erase`).
+constexpr uint8_t kFormatVersion = 11;
 
 // [Prompt 39] Маска дозволених логічних входів (Settings::inputEnabledMask): біт i = вхід i.
-// [Prompt 48a] 3 логічні входи (0 радіо, 1 TV Box, 2 Computer): маска = 3 біти, за замовчуванням усі
-// дозволені (kInputMaskDefault = 0x07). Біт 0 (радіо) завжди 1 — вимкнути можна лише входи 1..2.
+// [D2a] 4 логічні входи (0 радіо, 1 Computer, 2 Aux, 3 Плеєр): маска = 4 біти, за замовчуванням усі
+// дозволені (kInputMaskDefault = 0x0F). Біт 0 (радіо) завжди 1 — вимкнути можна лише входи 1..3.
 // Апаратної недоступності входів більше немає (чипів нема): вхід «доступний» = дозволений маскою.
 static_assert(defaults::kInputCount <= 8, "inputEnabledMask is a single byte");
 constexpr uint8_t kInputMaskAll = static_cast<uint8_t>((1u << defaults::kInputCount) - 1u);
 constexpr uint8_t kInputMaskRadioBit = 0x01;
-// [Prompt 48a] Маска за замовчуванням: усі три входи дозволені (0x07).
+// [D2a] Маска за замовчуванням: усі чотири входи дозволені (0x0F).
 constexpr uint8_t kInputMaskDefault = kInputMaskAll;
-static_assert(kInputMaskDefault == 0x07, "default input mask = radio + TV Box + Computer");
+static_assert(kInputMaskDefault == 0x0F, "default input mask = radio + Computer + Aux + Player");
 
 // Єдине місце нормалізації маски: зайві біти (≥ kInputCount) скидаються, біт радіо = 1.
 constexpr uint8_t normalizeInputMask(uint8_t m) {
@@ -105,4 +108,3 @@ constexpr uint16_t kTestRampSteps  = 100;
 constexpr uint32_t kTestRampStepMs = 20;
 
 }  // namespace settings_cfg
-

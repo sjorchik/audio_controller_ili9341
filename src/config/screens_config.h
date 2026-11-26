@@ -123,12 +123,14 @@ constexpr int16_t kExtAreaBottom = kVuY - kVuGapAbove;                  // ве�
 constexpr int16_t kExtNameDy     = -4;   // ручна підгонка: від'ємне = вище (P38, за побажанням власника)
 constexpr int16_t kExtNameY      = kExtAreaTop +
     (kExtAreaBottom - kExtAreaTop - display_cfg::kFontXLargePx) / 2 + kExtNameDy;   // верх рядка шрифту (y=33)
-// [Prompt 48a] Світлі кольори назви за номером зовнішнього входу 1..2 (індекс масиву = inputIndex - 1):
-// TV Box і Computer. Підібрано, щоб відрізнятись від бірюзового VU (kColorVuLit = 0,235,215): зелений —
-// без синьої складової. Кольори колишніх входів 3 / 4 (блакитний, фіолетовий) прибрано разом із входами.
+// [D2a] Світлі кольори назви за номером не-радіо входу 1..3 (індекс масиву = inputIndex - 1):
+// Computer, Aux, Плеєр. Підібрано, щоб відрізнятись від бірюзового VU (kColorVuLit = 0,235,215): червоний і
+// зелений — без синьої складової; Плеєр — світло-фіолетовий (синя складова є, але з сильною червоною — на тлі
+// бірюзового VU не плутається).
 constexpr uint16_t kColorInputName[] = {
-    display_cfg::rgb565(120, 255, 120),   // вхід 1 (TV Box) — світло-зелений
-    display_cfg::rgb565(255, 120, 120),   // вхід 2 (Computer) — світло-червоний
+    display_cfg::rgb565(255, 120, 120),   // вхід 1 (Computer) — світло-червоний
+    display_cfg::rgb565(120, 255, 120),   // вхід 2 (Aux) — світло-зелений
+    display_cfg::rgb565(200, 150, 255),   // вхід 3 (Плеєр) — світло-фіолетовий
 };
 static_assert(sizeof(kColorInputName) / sizeof(kColorInputName[0]) + 1 == defaults::kInputCount,
               "one name color per external input (logical 1..kInputCount-1)");

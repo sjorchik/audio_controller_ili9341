@@ -32,10 +32,10 @@ constexpr int kXsmt = 45;         // active-low, зовнішній pulldown 10 
 constexpr int kAmpStby = 46;      // 1 = працює, 0 = standby; strapping-пін (pulldown 10 кОм до GND)
 
 // --- Реле-селектор зовнішніх входів (P48a) ---
-// ОДНЕ DPDT-реле на одному GPIO: вимкнено = логічний вхід 1 (TV Box), увімкнено = вхід 2 (Computer);
-// активний рівень — input_selector_cfg::kRelayActiveHigh (HIGH = Computer). Колишній SDA I2C
-// (аудіочіпи й I2C вирізано). ПРИПУЩЕННЯ планування: GPIO1; власник виправить, якщо розпаяно інакше.
-// Рекомендація до плати: pulldown на затворі / базі драйвера реле.
+// ОДНЕ DPDT-реле на одному GPIO: вимкнено (LOW) = логічний вхід 1 (Computer), увімкнено (HIGH) = вхід 2 (Aux);
+// [D2a] полярність протилежна старому пристрою; активний рівень — input_selector_cfg::kRelayActiveHigh
+// (HIGH = Aux). Колишній SDA I2C (аудіочіпи й I2C вирізано). GPIO1 підтверджено роботою.
+// Рекомендація до плати: pulldown на затворі / базі драйвера реле (тоді до begin() реле = Computer).
 constexpr int kInputRelay = 1;
 
 // --- Енкодер ---
