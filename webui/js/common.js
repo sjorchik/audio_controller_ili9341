@@ -33,8 +33,10 @@ const CONFIG = {
   importTimeoutMs: 60000,    // імпорт довгий: запис у flash
   searchDebounceMs: 150,
   // --- Звук і входи (P51a; web_api.md §1.3, §13). createSlider використовує volumeSendMinMs / volumeHoldMs ---
-  inputCount: 3,             // логічних входів: 0 = радіо, 1 = TV Box, 2 = Computer
-  inputDefaultNames: ['WiFi Radio', 'TV Box', 'Computer'], // типові назви (підказка в полях; справжні віддає API)
+  // D2b: ЄДИНА константа кількості входів для всіх сторінок (= defaults::kInputCount у прошивці).
+  // Де можливо, сторінки беруть кількість з відповіді API (home.js); решта (повзунки «Аудіо», поля назв) будується до відповіді.
+  inputCount: 4,             // логічних входів: 0 = радіо, 1 = Computer, 2 = Aux, 3 = Player
+  inputDefaultNames: ['WiFi Radio', 'Computer', 'Aux', 'Player'], // типові назви (підказка в полях; справжні віддає API)
   volumeMin: 0, volumeMax: 100,        // шкала гучності фіксована (web_api.md §2, §4.3)
   balanceMinDb: -20, balanceMaxDb: 20, balanceStepDb: 1, balanceNeutralDb: 0, // баланс, дБ; «+» = вправо
   // --- Пульт (Prompt 22) ---
@@ -173,7 +175,7 @@ const REASONS = {
   no_code_for_action: 'Для цієї кнопки немає навченого коду.',
   not_in_conflict: 'Конфлікту вже немає.',
   invalid_name: 'Недопустима назва входу.',
-  expected_array_of_3: 'Потрібно рівно 3 назви входів.',
+  expected_array_of_inputs: 'Кількість назв не збігається з кількістю входів на пристрої. Оновіть сторінку.',
   empty_request: 'Порожній запит.',
   // Wi-Fi (P29)
   wifi_ssid_invalid: 'Некоректна назва мережі: 1…32 байти, без керівних символів.',
@@ -603,13 +605,13 @@ async function rebootAndWait(path, body, before) {
 }
 
 /* ---------- Вимкнені входи (Prompt 39b; web_api.md §12) ---------- */
-/* Спільний кеш GET /api/inputs (рівно 3 входи) для «Головної», «Аудіо» і «Налаштувань».
+/* Спільний кеш GET /api/inputs (CONFIG.inputCount входів; зараз 4) для «Головної», «Аудіо» і «Налаштувань».
    /api/status.inputs[] не містить enabled, тож сторінки фільтрують списки входів через isInputEnabled(). */
 const inputsState = { data: null, sig: '', input: null, busy: null, dirty: false, nextAt: 0, listeners: [] };
 
 /* Підписка на зміну списку входів (дані реально змінилися). */
 function onInputsChange(fn) { inputsState.listeners.push(fn); }
-/* Останні дані {inputs:[{index,name,available,enabled,selectable,canDisable}×3], enabledMask, input} або null. */
+/* Останні дані {inputs:[{index,name,available,enabled,selectable,canDisable}×N], enabledMask, input} або null (N = CONFIG.inputCount). */
 function getInputs() { return inputsState.data; }
 /* true, якщо вхід не вимкнено. Невідомо (кеш ще не завантажено) -> true; радіо (0) -> завжди true. */
 function isInputEnabled(index) {

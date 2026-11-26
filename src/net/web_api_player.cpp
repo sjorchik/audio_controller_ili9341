@@ -4,8 +4,8 @@
 // [Prompt 30] + GET/POST /api/eq (багатосмуговий еквалайзер; смуг — eq_cfg::kBandCount). На відміну від решти, /api/eq НЕ
 // йде через AppController::runWebCommand(): це чисто програмний фільтр у хуку PCM (audio/eq.*),
 // без заліза й без стану контролера; обробник кладе значення в eq::* і в Settings (NVS, дебаунс).
-// [Prompt 48a] Аудіочіпи вирізано: 3 логічні входи (0 радіо, 1 TV Box, 2 Computer), `requireProc()` і
-// capabilities() прибрано; діапазон гучності — audio_cfg::kVolumeUiMin..kVolumeUiMax; /api/inputs і /api/eq працюють по kInputCount (3). registerPlayerRoutes() без параметра AudioProcessor*: параметр прибрано разом із AudioProcessor.
+// [Prompt 48a / D2a] Аудіочіпи вирізано: kInputCount логічних входів (0 радіо, 1 Computer, 2 Aux, 3 Player), `requireProc()` і
+// capabilities() прибрано; діапазон гучності — audio_cfg::kVolumeUiMin..kVolumeUiMax; /api/inputs і /api/eq працюють по kInputCount (4). registerPlayerRoutes() без параметра AudioProcessor*: параметр прибрано разом із AudioProcessor.
 // [Prompt 48b] + POST /api/balance {"value":N[,"input":M]}: цифровий баланс ±20 дБ (balance_cfg), індивідуальний для кожного
 // входу. Активний вхід (без `input` або input == поточний) — через AppController::runWebCommand(BalanceSet): DSP
 // радіо / проходу + профіль; НЕАКТИВНИЙ вхід — лише запис у Settings (як /api/eq), застосується при перемиканні.
@@ -21,7 +21,7 @@
 // (те саме, що кнопки/пульт: ramp, мʼют на переходах, збереження в Settings). Тут лише:
 // розбір і валідація тіла, перевірка меж за capabilities(), мапінг WebCmdResult -> HTTP-код.
 //
-// [Prompt 39] + GET/POST /api/inputs: доступність і відключення зовнішніх входів 1..3 (радіо — завжди
+// [Prompt 39] + GET/POST /api/inputs: доступність і відключення входів 1..kInputCount-1 (радіо — завжди
 // дозволене). Зміна йде через AppController::runWebCommand(InputsEnabledSet), бо контролер має
 // перемкнути активний вхід, якщо його вимкнено; сам обробник лише валідує тіло й будує відповідь.
 //
@@ -199,7 +199,7 @@ void handleVolume(AsyncWebServerRequest* req) {
 }
 
 // ---------------------------------------------------------------------------
-// POST /api/input {"index":N}   [Prompt 48a] логічний вхід 0..2 (радіо, TV Box, Computer)
+// POST /api/input {"index":N}   [Prompt 48a / D2a] логічний вхід 0..kInputCount-1 (радіо, Computer, Aux, Player)
 // ---------------------------------------------------------------------------
 void handleInput(AsyncWebServerRequest* req) {
     if (!exactUrl(req, "/api/input")) return;
@@ -303,7 +303,7 @@ void handlePlayerStation(AsyncWebServerRequest* req) {
 //   POST: {"gainsDb":[...]}  (рівно eq_cfg::kBandCount елементів; null = смугу не чіпати)
 //         або {"band":N,"gainDb":X}  (одна смуга, N = 0..kBandCount - 1)
 //         -> 200 {"ok":true, ...те саме, що GET}
-// [Prompt 46b] Необовʼязковий вхід: GET /api/eq?input=N, POST {"input":N,...}; N = 0..2 (P48a; профіль цього входу,
+// [Prompt 46b] Необовʼязковий вхід: GET /api/eq?input=N, POST {"input":N,...}; N = 0..kInputCount-1 (P48a / D2a; профіль цього входу,
 // незалежно від апаратної доступності); без поля — ПОТОЧНИЙ вхід. Відповідь (GET і POST) містить "input".
 // [Prompt 46a] Пресет — ПОТОЧНОГО входу (профіль у Settings). Зберігається для будь-якого входу;
 // на екземпляр радіо діє лише пресет входу 0. [Prompt 47c] Пресет ПОТОЧНОГО зовнішнього входу застосовується
@@ -742,14 +742,14 @@ void handleVuPost(AsyncWebServerRequest* req) {
 // ---------------------------------------------------------------------------
 // [Prompt 39] GET /api/inputs, POST /api/inputs — доступність і відключення входів
 //   GET : {"inputs":[{"index":0,"name":"WiFi Radio","available":true,"enabled":true,
-//                     "selectable":true,"canDisable":false}, ... 3 входи (P48a) ...],
+//                     "selectable":true,"canDisable":false}, ... kInputCount входів (зараз 4) ...],
 //          "enabledMask":7,"input":0}
-//         available  = завжди true (P48a: чипів немає, усі 3 входи апаратно є);
+//         available  = завжди true (P48a: чипів немає, усі входи апаратно є);
 //         enabled    = дозволено користувачем (маска); selectable = available && enabled;
 //         canDisable = false лише для радіо (вхід 0).
-//   POST: {"enabled":[a,b,c]}        рівно 3 елементи (P48a): true | false | null (= не змінювати);
+//   POST: {"enabled":[a,b,c,d]}      рівно kInputCount елементів (зараз 4): true | false | null (= не змінювати);
 //                                    елемент 0 (радіо) ігнорується: радіо завжди дозволене
-//         або {"index":N,"enabled":true|false}   (одне поле, N = 0..2)
+//         або {"index":N,"enabled":true|false}   (одне поле, N = 0..kInputCount-1)
 //         -> 200 {"ok":true, ...те саме, що GET}; 409 ota_in_progress | ir_learn_active; 503 busy.
 // Дозволено і в Standby. Зберігається в NVS (з дебаунсом, лише при зміні) і діє після перезапуску.
 // ---------------------------------------------------------------------------
@@ -757,7 +757,7 @@ void handleVuPost(AsyncWebServerRequest* req) {
 // Settings `st` мусить жити в викликача, поки doc не серіалізовано (sendJson() — синхронний).
 void fillInputsState(JsonDocument& doc, const Settings& st) {
     const uint8_t mask = settings_cfg::normalizeInputMask(st.inputEnabledMask);
-    const uint8_t hw = defaults::kInputCount;  // [P48a] апаратно доступні всі 3 логічні входи
+    const uint8_t hw = defaults::kInputCount;  // [P48a] апаратно доступні всі логічні входи
     JsonArray arr = doc["inputs"].to<JsonArray>();
     for (uint8_t i = 0; i < defaults::kInputCount; ++i) {
         const bool available = (i < hw);

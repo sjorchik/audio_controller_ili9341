@@ -1,5 +1,5 @@
 'use strict';
-/* Сторінка «Головна» (Prompt 19; P51a: 3 входи, без аудіочіпа / тембру). Залежить від common.js і nav.js. */
+/* Сторінка «Головна» (Prompt 19; P51a: без аудіочіпа / тембру; D2b: 4 входи, кількість — з відповіді API). Залежить від common.js і nav.js. */
 (() => {
   const STREAM = {
     Idle: ['Зупинено', ''], Connecting: ['Підключення…', 'badge-warn'],
@@ -83,7 +83,7 @@
     const d = getInputs();
     const src = d ? d.inputs.filter((i) => i.selectable !== false && i.available !== false && i.enabled !== false)
                   : (st.inputs || []).filter((i) => i.available && isInputEnabled(i.index));
-    const list = src.slice(0, CONFIG.inputCount);
+    const list = src;                                  // D2b: кількість входів — з відповіді API (без обрізання константою)
     const sig = JSON.stringify(list.map((i) => [i.index, i.name]));
     if (sig !== inputsSig) {
       inputsSig = sig;

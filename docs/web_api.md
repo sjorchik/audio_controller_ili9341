@@ -1,7 +1,8 @@
 # HTTP API пристрою (ESP32-S3 Audio Controller)
 
 Документ-контракт для фронтенду. Опис ПОВНИЙ і самодостатній: C++ читати не треба.
-Версія контракту: **P50a** (3 входи, цифровий баланс і EQ по входах, без аудіочіпів). Історія: Prompt 18 (прошивка
+Версія контракту: **P50a + D2b** (4 входи: Радіо, Computer, Aux, Player; цифровий баланс і EQ по входах, без аудіочіпів;
+D2b: код помилки `inputNames` — `expected_array_of_inputs`, `enabledMask` до 15). Історія: Prompt 18 (прошивка
 `0.18.0`, див. `GET /api/system`); семантику `station.name` уточнено в Prompt 20b; Prompt 25: поле станції `levelDb`
 (§5); Prompt 29: кілька збережених Wi-Fi мереж (§7); Prompt 30: еквалайзер `GET` / `POST /api/eq` (§11);
 Prompt 39: відключення входів `GET` / `POST /api/inputs` (§12), причина `409 input_disabled`; P46–P49: профіль входу =
@@ -69,14 +70,15 @@ E1–E4: еквалайзер — діапазон ±18 дБ на смугу, 10
 
 ### 1.3. Профілі входів
 
-Пристрій має **3 логічні входи**: `0` = радіо (WiFi Radio), `1` = TV Box, `2` = Computer. Налаштування звуку
+Пристрій має **4 логічні входи**: `0` = радіо (WiFi Radio), `1` = Computer, `2` = Aux, `3` = Player
+(заглушка до інтеграції media-модуля: звуку немає). Налаштування звуку
 зберігаються в NVS **окремо для кожного входу**: профіль входу = `{гучність, пресет EQ (підсилення кожної смуги, §11), баланс, чутливість VU}`.
 Бас / дискант / gain / loudness не існують (див. §14). Мʼют (`mute`) глобальний і в профіль не входить.
 Чутливість VU (V2, §15) впливає лише на показ індикатора рівня, не на звук.
 
 - `POST /api/volume` і `POST /api/balance` (без `input` або з `input` = поточний) працюють з профілем **поточного**
   входу: значення застосовується одразу й запамʼятовується для цього входу (запис у NVS — з дебаунсом).
-- `/api/eq`, `/api/balance` і `POST /api/vu` приймають необовʼязковий `input` (0..2) (`GET /api/vu` віддає всі 3 входи одразу): тоді читається / змінюється профіль цього входу
+- `/api/eq`, `/api/balance` і `POST /api/vu` приймають необовʼязковий `input` (0..3) (`GET /api/vu` віддає всі 4 входи одразу): тоді читається / змінюється профіль цього входу
   (для неактивного входу — лише запис у профіль, звук не змінюється; застосується при перемиканні на вхід).
 - При перемиканні входу (`POST /api/input`, `POST /api/player/station` із `switchInput`, кнопки, пульт) і при виході зі
   standby пристрій під мʼютом застосовує профіль нового входу (гучність, EQ, баланс, чутливість VU), після чого розмʼючує звук;
@@ -99,8 +101,9 @@ E1–E4: еквалайзер — діапазон ±18 дБ на смугу, 10
   "inputName": "WiFi Radio",
   "inputs": [
     {"index": 0, "name": "WiFi Radio", "available": true},
-    {"index": 1, "name": "TV Box",     "available": true},
-    {"index": 2, "name": "Computer",   "available": true}
+    {"index": 1, "name": "Computer",   "available": true},
+    {"index": 2, "name": "Aux",        "available": true},
+    {"index": 3, "name": "Player",     "available": true}
   ],
   "volume": 35, "balance": 0, "vuSens": 0,
   "mute": false,
@@ -163,7 +166,7 @@ E1–E4: еквалайзер — діапазон ±18 дБ на смугу, 10
 
 ```json
 {
-  "inputNames": ["WiFi Radio", "TV Box", "Computer"],
+  "inputNames": ["WiFi Radio", "Computer", "Aux", "Player"],
   "brightness": 80, "displayFlipped": false,
   "lastInput": 0, "lastStation": 4, "lastVolume": 35, "lastMute": false
 }
@@ -213,7 +216,7 @@ E1–E4: еквалайзер — діапазон ±18 дБ на смугу, 10
 ```
 
 Коди `errors[].code`: `invalid_value` (не той тип / не ціле), `out_of_range` (+`min`,`max`), `unknown_field`,
-`expected_array_of_3` (`inputNames` не масив або довжина ≠ 3), `invalid_name` (+`index`, `maxBytes`), `empty_request`.
+`expected_array_of_inputs` (`inputNames` не масив або довжина ≠ кількості входів, зараз 4; D2b: замість `expected_array_of_3`), `invalid_name` (+`index`, `maxBytes`), `empty_request`.
 Інші помилки тіла: `400 no_body | invalid_json`, `413 body_too_large`.
 
 > Гучність, мʼют, вхід, баланс, standby — **не** тут, див. §4 і §13.
@@ -263,7 +266,7 @@ E1–E4: еквалайзер — діапазон ±18 дБ на смугу, 10
 
 ### 4.5. `POST /api/input`
 
-`{"index":N}` — вибір входу `0..2` (0 радіо, 1 TV Box, 2 Computer). Індекс поза `0..2` → `400 out_of_range`
+`{"index":N}` — вибір входу `0..3` (0 радіо, 1 Computer, 2 Aux, 3 Player). Індекс поза `0..3` → `400 out_of_range`
 (`min:0`,`max:2`). Вхід, вимкнений у налаштуваннях (§12), → `409 input_disabled` (радіо, вхід 0, вимкнути не можна).
 Зміна входу з/на Radio зупиняє/запускає потік; мʼют і плавний підйом — як на пристрої. Під мʼютом застосовується
 профіль нового входу (гучність, EQ, баланс; §1.3), тож `GET /api/status` одразу показує його `volume` і `balance`.
@@ -303,7 +306,7 @@ E1–E4: еквалайзер — діапазон ±18 дБ на смугу, 10
 `0` = без послаблення. Дефолт — **`-20`**: нова станція без поля, станції зі старого збереженого списку,
 імпорт M3U / PLS. Це цифрове послаблення сигналу радіо до ЦАП; застосовується, коли станція починає грати (будь-яким
 шляхом), і **наживо** (плавно, без перепідключення), якщо змінити `levelDb` станції, що зараз грає (зміна
-підхоплюється за період синхронізації контролера, ≈ до секунди). Зовнішні входи (TV Box / Computer / Aux) не змінюються.
+підхоплюється за період синхронізації контролера, ≈ до секунди). Зовнішні входи (Computer / Aux / Player) не змінюються.
 Окремого глобального налаштування й `levelDb` у `/api/status` немає.
 
 > **Індекс станції ПОЗИЦІЙНИЙ.** Стабільного `id` немає. Додавання зберігає індекси попередніх; видалення,
@@ -699,7 +702,7 @@ curl -X POST --data-binary @firmware.bin -H "Content-Type: application/octet-str
 ## 11. Еквалайзер (Prompt 30; по входах — P46–P47)
 
 Багатосмуговий цифровий графічний еквалайзер (peaking-фільтри другого порядку, Q = 1.0; у поточній прошивці 10 смуг). Пресет **окремий для кожного
-входу** і є частиною профілю входу (§1.3): на радіо діє пресет входу 0, на зовнішніх входах (TV Box / Computer) —
+входу** і є частиною профілю входу (§1.3): на радіо діє пресет входу 0, на зовнішніх входах (Computer / Aux) —
 пресет активного входу. Порядок обробки радіо: еквалайзер → рівень станції (`levelDb`, §5) → гучність → ЦАП.
 
 Кількість смуг (`kBandCount`, у поточній прошивці **10**) задає прошивка, а не клієнт: `gainsDb` і `freqHz` у `GET` / `POST /api/eq`
@@ -782,7 +785,7 @@ POST /api/eq  {"gainsDb":[0,0,0]}  -> 400 {"ok":false,"error":"invalid_value","f
 
 ## 12. Входи: доступність і відключення (Prompt 39)
 
-Зовнішні входи 1–2 (TV Box / Computer) можна **відключити**: вони зникають із перемикання на пристрої
+Входи 1–3 (Computer / Aux / Player) можна **відключити**: вони зникають із перемикання на пристрої
 (кнопки UP/DOWN, пульт, енкодер) і не приймаються `POST /api/input`. **Радіо (вхід 0) відключити не можна** — воно
 завжди дозволене. Налаштування глобальне і зберігається в NVS (запис із дебаунсом, лише при зміні); за замовчуванням
 дозволені всі входи. Керування — лише з вебу. Вхід «вибирається» (`selectable`), коли він і **апаратно є**
@@ -794,17 +797,18 @@ POST /api/eq  {"gainsDb":[0,0,0]}  -> 400 {"ok":false,"error":"invalid_value","f
 {
   "inputs": [
     {"index": 0, "name": "WiFi Radio", "available": true, "enabled": true,  "selectable": true,  "canDisable": false},
-    {"index": 1, "name": "TV Box",     "available": true, "enabled": false, "selectable": false, "canDisable": true},
-    {"index": 2, "name": "Computer",   "available": true, "enabled": true,  "selectable": true,  "canDisable": true}
+    {"index": 1, "name": "Computer",   "available": true, "enabled": true,  "selectable": true,  "canDisable": true},
+    {"index": 2, "name": "Aux",        "available": true, "enabled": false, "selectable": false, "canDisable": true},
+    {"index": 3, "name": "Player",     "available": true, "enabled": true,  "selectable": true,  "canDisable": true}
   ],
-  "enabledMask": 5,
+  "enabledMask": 11,
   "input": 0
 }
 ```
 
-(без `ok`, як інші `GET`; доступний завжди, також у standby і під час OTA.) Масив завжди має **3** елементи
+(без `ok`, як інші `GET`; доступний завжди, також у standby і під час OTA.) Масив завжди має **4** елементи
 (логічні входи). `name` — користувацька назва з налаштувань, інакше типова. `enabledMask` — біти дозволених входів
-(біт `i` = вхід `i`; біт 0 завжди 1; за замовчуванням `7`). `input` — поточний активний вхід (як `input` у
+(біт `i` = вхід `i`; біт 0 завжди 1; за замовчуванням `15`). `input` — поточний активний вхід (як `input` у
 `GET /api/status`).
 
 ### 12.2. `POST /api/inputs`
@@ -845,8 +849,8 @@ POST /api/eq  {"gainsDb":[0,0,0]}  -> 400 {"ok":false,"error":"invalid_value","f
 Приклади:
 
 ```
-POST /api/inputs  {"index":2,"enabled":false}           -> 200 {"ok":true,"inputs":[...],"enabledMask":3,"input":0}
-POST /api/inputs  {"enabled":[null,false,true]}         -> 200 (вхід 1 вимкнено, вхід 2 увімкнено)
+POST /api/inputs  {"index":2,"enabled":false}           -> 200 {"ok":true,"inputs":[...],"enabledMask":11,"input":0}
+POST /api/inputs  {"enabled":[null,false,true,true]}    -> 200 (вхід 1 вимкнено, входи 2 і 3 увімкнено)
 POST /api/inputs  {"index":0,"enabled":false}           -> 200 (радіо лишається дозволеним, enabledMask без змін)
 POST /api/inputs  {"enabled":[true,true]}               -> 400 {"ok":false,"error":"invalid_value","field":"enabled"}
 POST /api/input   {"index":2}  (вхід 2 вимкнено)        -> 409 {"ok":false,"error":"input_disabled"}

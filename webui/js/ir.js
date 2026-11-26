@@ -22,11 +22,11 @@
     UP: ['Вгору', 'nav'], DOWN: ['Вниз', 'nav'], LEFT: ['Вліво', 'nav'], RIGHT: ['Вправо', 'nav'],
     OK: ['OK', 'nav'], BACK: ['Назад', 'nav'], MENU: ['Меню', 'nav'],
   };
-  const INPUT_ACTIONS = { INPUT_RADIO: 0, INPUT_TV: 1, INPUT_PC: 2 };   // → індекс логічного входу
+  const INPUT_ACTIONS = { INPUT_RADIO: 0, INPUT_PC: 1 };   // → індекс логічного входу (D2a / D2b: 0 Радіо, 1 Computer; INPUT_TV / INPUT_AUX поки без дії)
   /* Дії, які не навчаються (web_api.md §6.5): ENC_*, BASS_*, TREBLE_*, GAIN_*, INPUT_AUX.
      Контракт їх у /api/ir/actions не віддає, а поле `learnable` (якщо з'явиться) має пріоритет;
      шаблон — страховка на випадок, якщо пристрій їх усе ж поверне. */
-  const NOT_LEARNABLE = /^(ENC_|BASS_|TREBLE_|GAIN_)|^INPUT_AUX$/;
+  const NOT_LEARNABLE = /^(ENC_|BASS_|TREBLE_|GAIN_)|^INPUT_(AUX|TV)$/;   // D2b: INPUT_TV прихований, доки прошивка не мапить його на Aux / Player (окремий крок IR)
   const isLearnable = (a) => !!a && typeof a.action === 'string' && a.learnable !== false && !NOT_LEARNABLE.test(a.action);
   function info(a) {
     if (Object.prototype.hasOwnProperty.call(INPUT_ACTIONS, a)) {

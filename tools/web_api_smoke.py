@@ -21,6 +21,8 @@
 /api/power (standby), реальні factory-reset / wifi-reset.
 
 Оновлено в P50a: без processor / gain / тембру; додано GET /api/balance, menuContext, 3 входи.
+Оновлено в D2b: 4 входи (INPUT_COUNT = 4), код помилки inputNames - expected_array_of_inputs,
+додано GET /api/inputs (форма, enabledMask) і негативні POST /api/inputs / /api/settings з хибною довжиною масиву.
 Оновлено в E2c: GET /api/eq (кількість смуг = len(freqHz), межі з minDb / maxDb / stepDb, без зашитих 5 / 8 / 10 і ±12 / ±18);
 з --write - зміна смуги й масиву з поверненням пресету (активний і неактивний вхід), негативні випадки POST /api/eq.
 Оновлено у V2: GET /api/vu, status.vuSens; з --write — чутливість VU активного й неактивного входу (зміна й повернення),
@@ -38,7 +40,7 @@ import urllib.request
 
 PASS, FAIL, SKIP = "PASS", "FAIL", "SKIP"
 VOLUME_MIN, VOLUME_MAX = 0, 100          # audio_cfg::kVolumeUiMin / kVolumeUiMax (processor.capabilities прибрано в P50a)
-INPUT_COUNT = 3                          # defaults::kInputCount (0 радіо, 1 TV Box, 2 Computer)
+INPUT_COUNT = 4                          # defaults::kInputCount (0 радіо, 1 Computer, 2 Aux, 3 Player)
 BALANCE_MIN, BALANCE_MAX = -20, 20       # balance_cfg::kMinDb / kMaxDb
 VU_MIN, VU_MAX, VU_STEP = -20, 20, 1     # vu_sens_cfg::kMinDb / kMaxDb / kStepDb (V2)
 MENU_CONTEXTS = ("None", "StationList", "EqBalance")
@@ -274,6 +276,23 @@ def read_checks(d):
         record("settings.inputNames рівно %d" % INPUT_COUNT,
                isinstance(sett["inputNames"], list) and len(sett["inputNames"]) == INPUT_COUNT)
 
+    # --- GET /api/inputs (D2b: 4 входи, enabledMask 0..15, біт 0 завжди 1) ---
+    ok_i, inp = expect("GET /api/inputs", d.get("/api/inputs"), 200, ["inputs", "enabledMask", "input"])
+    if ok_i:
+        lst = inp["inputs"]
+        good = (isinstance(lst, list) and len(lst) == INPUT_COUNT and
+                [x.get("index") for x in lst] == list(range(INPUT_COUNT)) and
+                all(has_keys(x, ["name", "available", "enabled", "selectable", "canDisable"]) for x in lst))
+        record("inputs[] рівно %d, index 0..%d, повний набір полів" % (INPUT_COUNT, INPUT_COUNT - 1), good, str(lst)[:100])
+        mask = inp["enabledMask"]
+        mask_ok = _is_int(mask) and 0 <= mask < (1 << INPUT_COUNT) and (mask & 1) == 1
+        record("inputs.enabledMask 0..%d, біт 0 = 1" % ((1 << INPUT_COUNT) - 1), mask_ok, "got %r" % (mask,))
+        if good and mask_ok:
+            record("inputs[].enabled узгоджено з enabledMask",
+                   all(bool(x["enabled"]) == bool((mask >> x["index"]) & 1) for x in lst))
+        record("inputs.input в 0..%d" % (INPUT_COUNT - 1), _is_int(inp["input"]) and 0 <= inp["input"] < INPUT_COUNT,
+               "got %r" % (inp["input"],))
+
     # --- GET /api/balance (P50a) ---
     ok_b, bal = expect("GET /api/balance (активний вхід)", d.get("/api/balance"), 200, ["input", "balance"])
     if ok_b and ok:
@@ -411,10 +430,16 @@ def write_checks(d, st, args):
         codes = [e.get("code") for e in resp.get("errors", [])] if isinstance(resp, dict) else []
         record("POST /api/settings {%s} -> 400 unknown_field" % key,
                status == 400 and codes == ["unknown_field"], "HTTP %s %s" % (status, str(resp)[:80]))
-    status, resp = d.post("/api/settings", {"inputNames": ["a", "b"]})
-    codes = [e.get("code") for e in resp.get("errors", [])] if isinstance(resp, dict) else []
-    record("POST /api/settings inputNames (2 елементи) -> 400 expected_array_of_3",
-           status == 400 and codes == ["expected_array_of_3"], "HTTP %s %s" % (status, str(resp)[:80]))
+    for n_names in (2, INPUT_COUNT - 1, INPUT_COUNT + 1):   # D2b: будь-яка довжина, крім INPUT_COUNT
+        status, resp = d.post("/api/settings", {"inputNames": ["a"] * n_names})
+        codes = [e.get("code") for e in resp.get("errors", [])] if isinstance(resp, dict) else []
+        record("POST /api/settings inputNames (%d елементи) -> 400 expected_array_of_inputs" % n_names,
+               status == 400 and codes == ["expected_array_of_inputs"], "HTTP %s %s" % (status, str(resp)[:80]))
+    for n_en in (INPUT_COUNT - 1, INPUT_COUNT + 1):
+        expect("POST /api/inputs enabled (%d елементи) -> 400 invalid_value" % n_en,
+               d.post("/api/inputs", {"enabled": [None] * n_en}), 400, ["error"], "invalid_value")
+    expect("POST /api/inputs index=%d -> 400 out_of_range" % INPUT_COUNT,
+           d.post("/api/inputs", {"index": INPUT_COUNT, "enabled": True}), 400, ["error", "min", "max"], "out_of_range")
     expect("POST /api/balance {} -> 400 missing_field", d.post("/api/balance", {}), 400, ["error"], "missing_field")
     expect("POST /api/balance unknown field -> 400", d.post("/api/balance", {"value": 0, "x": 1}), 400, ["error"],
            "unknown_field")

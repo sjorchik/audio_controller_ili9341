@@ -182,8 +182,8 @@ void handleStatus(AsyncWebServerRequest* req) {
     doc["track"] = st.trackTitle;
     doc["streamStatus"] = streamStatusName(st.streamStatus);
 
-    // [Prompt 18] ДОДАНО: перелік входів для вибору. [Prompt 48a] 3 логічні входи (0 радіо, 1 TV Box,
-    // 2 Computer): апаратно доступні всі (available = true), вимкнення — маскою (/api/inputs).
+    // [Prompt 18] ДОДАНО: перелік входів для вибору. [Prompt 48a / D2a] kInputCount логічних входів (0 радіо,
+    // 1 Computer, 2 Aux, 3 Player): available = true для всіх, вимкнення — маскою (/api/inputs).
     JsonArray inputs = doc["inputs"].to<JsonArray>();
     for (uint8_t i = 0; i < defaults::kInputCount; ++i) {
         JsonObject o = inputs.add<JsonObject>();
@@ -354,7 +354,7 @@ void parsePlan(JsonObjectConst root, Plan& plan, JsonArray errs, ParseFlags& f) 
             }
         } else if (strcmp(key, "inputNames") == 0) {
             if (!v.is<JsonArrayConst>() || v.as<JsonArrayConst>().size() != kNames) {
-                addErr(errs, "inputNames", "expected_array_of_3");
+                addErr(errs, "inputNames", "expected_array_of_inputs");  // [D2b] довжина ≠ defaults::kInputCount (код без числа)
                 f.invalid = true;
                 continue;
             }

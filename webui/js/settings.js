@@ -1,6 +1,6 @@
 'use strict';
 /* Сторінка «Налаштування» (Prompt 23). Залежить від common.js і nav.js.
-   Лише конфігурація пристрою (звук — на «Аудіо»). Назви входів — масив рівно з 3 елементів; яскравість і
+   Лише конфігурація пристрою (звук — на «Аудіо»). Назви входів — масив рівно з CONFIG.inputCount (4) елементів; яскравість і
    displayFlipped — окремі POST /api/settings (P51a: тип процесора й тембр прибрано).
    Блок «Входи» (V3): у кожному рядку — галочка активації входу (POST /api/inputs) і повзунок чутливості VU
    (GET / POST /api/vu, web_api.md §15). Блок Wi-Fi — короткий підсумок поточної мережі; керування мережами —
@@ -22,7 +22,7 @@
   let flipBusy = false;       // триває запит перемикача: опитування його не чіпає
   let loadingCfg = false;
   let cfgFailed = false;
-  let vu = null;              // {minDb, maxDb, stepDb, vals[3]} з GET /api/vu; null = ще не прочитано
+  let vu = null;              // {minDb, maxDb, stepDb, vals[CONFIG.inputCount]} з GET /api/vu; null = ще не прочитано
   let vuLoading = false;
   let vuFailed = false;
   const hideTimers = {};
@@ -53,7 +53,7 @@
   }
 
   /* ---------- Назви входів ---------- */
-  const INPUT_LABELS = ['Вхід 0 · інтернет-радіо', 'Вхід 1', 'Вхід 2'];
+  const INPUT_LABELS = ['Вхід 0 · інтернет-радіо', 'Вхід 1', 'Вхід 2', 'Вхід 3'];
   const fields = Array.from({ length: CONFIG.inputCount }, (_, i) => {
     const input = el('input', { class: 'input', type: 'text', id: 'in-' + i, autocomplete: 'off', spellcheck: 'false',
       placeholder: CONFIG.inputDefaultNames[i] || '' });
@@ -91,7 +91,7 @@
 
   async function saveNames() {
     if (busy || !cfg) return;
-    const arr = new Array(CONFIG.inputCount).fill(null);  // рівно 3 елементи; null = не змінювати (web_api.md §3.2)
+    const arr = new Array(CONFIG.inputCount).fill(null);  // рівно CONFIG.inputCount елементів; null = не змінювати (web_api.md §3.2)
     let any = false, bad = false;
     fields.forEach((f, i) => {
       setErr(f, '');
