@@ -1,7 +1,7 @@
 // core/weather_service.cpp [S2b]: сервіс погоди й пошуку міста (Open-Meteo).
 //
 // Потоки й ядра:
-//  - усі мережеві запити (TLS) і запис у NVS виконує ЛИШЕ задача "weather" (ядро 0, пріоритет 1);
+//  - усі мережеві запити (HTTP / HTTPS, [S2b2]) і запис у NVS виконує ЛИШЕ задача "weather" (ядро 0, пріоритет 1);
 //  - API-методи (з async_tcp, дисплея, ...) беруть м'ютекс на кілька мікросекунд і повертаються:
 //    пошук ставиться в чергу, зміна місця лише міняє стан у RAM й піднімає прапорець s_locDirty,
 //    який задача підхоплює за ≤ kPollMs (NVS-запис + негайне оновлення погоди);
@@ -12,6 +12,7 @@
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <HTTPClient.h>
+#include <NetworkClient.h>
 #include <NetworkClientSecure.h>
 #include <Preferences.h>
 #include <esp_heap_caps.h>
@@ -222,8 +223,25 @@ void persistLocation() {
 }
 
 // --- Умови запиту -------------------------------------------------------------------------------
+// [S2b2] Пороги пам'яті залежать від транспорту: HTTP (за замовчуванням) потребує набагато менше RAM,
+// ніж TLS (див. weather_config.h).
+size_t freeInternal() { return heap_caps_get_free_size(MALLOC_CAP_INTERNAL); }
+size_t largestInternal() { return heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL); }
+
+bool heapEnough(bool https) {
+    const size_t needFree = https ? cfg::kMinFreeHeap : cfg::kMinFreeHeapHttp;
+    const size_t needLargest = https ? cfg::kMinLargestBlock : cfg::kMinLargestBlockHttp;
+    const size_t freeInt = freeInternal();
+    const size_t largest = largestInternal();
+    if (freeInt >= needFree && largest >= needLargest) return true;
+    WX_LOG("postponed (%s): free=%u largest=%u (need %u / %u)", https ? "https" : "http",
+           static_cast<unsigned>(freeInt), static_cast<unsigned>(largest), static_cast<unsigned>(needFree),
+           static_cast<unsigned>(needLargest));
+    return false;
+}
+
 // true — можна йти в мережу. Інакше err = no_wifi / no_time / low_memory.
-bool preflight(char* err) {
+bool preflight(char* err, bool https = cfg::kUseHttps) {
     if (!WifiManager::isConnected()) {
         weather_util::copyUtf8Trunc(err, cfg::kErrorBytes, "no_wifi");
         return false;
@@ -232,19 +250,14 @@ bool preflight(char* err) {
         weather_util::copyUtf8Trunc(err, cfg::kErrorBytes, "no_time");
         return false;
     }
-    const size_t freeInt = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
-    const size_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
-    if (freeInt < cfg::kMinFreeHeap || largest < cfg::kMinLargestBlock) {
+    if (!heapEnough(https)) {
         weather_util::copyUtf8Trunc(err, cfg::kErrorBytes, "low_memory");
-        WX_LOG("postponed: free=%u largest=%u (need %u / %u)", static_cast<unsigned>(freeInt),
-               static_cast<unsigned>(largest), static_cast<unsigned>(cfg::kMinFreeHeap),
-               static_cast<unsigned>(cfg::kMinLargestBlock));
         return false;
     }
     return true;
 }
 
-// --- HTTPS ---------------------------------------------------------------------------------------
+// --- HTTP / HTTPS -------------------------------------------------------------------------------
 // Приймач тіла відповіді з обмеженням розміру (HTTPClient::writeToStream сам розбирає chunked).
 class CapSink : public Stream {
 public:
@@ -272,6 +285,7 @@ private:
     bool overflow_ = false;
 };
 
+// Лише HTTPS-гілка.
 void applyTrust(NetworkClientSecure& client) {
     if (cfg::kTlsInsecure) {
         client.setInsecure();  // УВАГА: без перевірки сертифіката (див. weather_config.h)
@@ -281,9 +295,35 @@ void applyTrust(NetworkClientSecure& client) {
     }
 }
 
-// Переводить помилку HTTPClient / код HTTP у короткий код для API.
-void classifyError(int code, NetworkClientSecure& client, uint32_t elapsedMs, char* err) {
-    if (code > 0) {
+// Повний URL (схема + хост / шлях). Статичний буфер: fetchJson / fetchOnce викликає ЛИШЕ задача "weather".
+char s_urlFull[cfg::kUrlBytes + 8];
+
+bool isRedirectCode(int code) { return code == 301 || code == 302 || code == 307 || code == 308; }
+
+// Збирає вільну RAM у кількох точках запиту (до / після заголовків / після тіла / після звільнення).
+// Це вибірка, а не безперервний моніторинг: справжній мінімум між точками може бути трохи нижчим.
+struct RamStat {
+    size_t freeBefore = 0;
+    size_t freeMin = 0;
+    size_t largestBefore = 0;
+    size_t largestMin = 0;
+    void begin() {
+        freeBefore = freeMin = freeInternal();
+        largestBefore = largestMin = largestInternal();
+    }
+    void sample() {
+        const size_t f = freeInternal();
+        const size_t l = largestInternal();
+        if (f < freeMin) freeMin = f;
+        if (l < largestMin) largestMin = l;
+    }
+};
+
+// Переводить помилку HTTPClient / код HTTP у короткий код для API. sec == nullptr для HTTP (немає TLS).
+void classifyError(int code, NetworkClientSecure* sec, uint32_t elapsedMs, char* err) {
+    if (isRedirectCode(code)) {
+        weather_util::copyUtf8Trunc(err, cfg::kErrorBytes, "redirect");  // автоматично НЕ слідуємо
+    } else if (code > 0) {
         snprintf(err, cfg::kErrorBytes, "http_%d", code);
     } else if (code == HTTPC_ERROR_READ_TIMEOUT) {
         weather_util::copyUtf8Trunc(err, cfg::kErrorBytes, "timeout");
@@ -292,13 +332,16 @@ void classifyError(int code, NetworkClientSecure& client, uint32_t elapsedMs, ch
     } else if (code == HTTPC_ERROR_STREAM_WRITE) {
         weather_util::copyUtf8Trunc(err, cfg::kErrorBytes, "parse");  // відповідь більша за буфер
     } else if (code == HTTPC_ERROR_CONNECTION_REFUSED) {
-        char tlsMsg[80];
-        // Код mbedTLS (великий від'ємний) = збій handshake / перевірки сертифіката -> "tls".
+        // Код mbedTLS (великий від'ємний) = збій handshake / перевірки сертифіката -> "tls" (лише HTTPS).
         // 0 або -1 («Generic error», з'єднання не встановлено): якщо чекали ≈ connect timeout -> "timeout"
         // (замовчане з'єднання, зокрема без інтернету), інакше швидка відмова (DNS / reset) -> "net".
-        const int tlsErr = client.lastError(tlsMsg, sizeof(tlsMsg));
+        int tlsErr = 0;
+        if (sec != nullptr) {
+            char tlsMsg[80];
+            tlsErr = sec->lastError(tlsMsg, sizeof(tlsMsg));
+            if (tlsErr != 0 && tlsErr != -1) WX_LOG("tls error %d: %s", tlsErr, tlsMsg);
+        }
         if (tlsErr != 0 && tlsErr != -1) {
-            WX_LOG("tls error %d: %s", tlsErr, tlsMsg);
             weather_util::copyUtf8Trunc(err, cfg::kErrorBytes, "tls");
         } else if (elapsedMs + 1000u >= cfg::kConnectTimeoutMs) {
             weather_util::copyUtf8Trunc(err, cfg::kErrorBytes, "timeout");
@@ -310,61 +353,113 @@ void classifyError(int code, NetworkClientSecure& client, uint32_t elapsedMs, ch
     }
 }
 
-// GET https://… -> s_resp (NUL-термінований). true — HTTP 200 і тіло прийнято; інакше err.
-bool fetchJson(const char* url, char* err, size_t& outLen) {
+// Один GET через уже створений клієнт (NetworkClient для HTTP, NetworkClientSecure для HTTPS).
+// HTTPClient створюється тут і знищується ДО клієнта в викликача.
+bool runGet(NetworkClient& client, NetworkClientSecure* sec, const char* url, uint32_t t0, RamStat& ram,
+            char* err, size_t& outLen) {
+    bool ok = false;
+    HTTPClient http;
+    http.setReuse(false);
+    http.setFollowRedirects(HTTPC_DISABLE_FOLLOW_REDIRECTS);  // явно: на HTTPS не переходимо самі
+    http.setUserAgent(cfg::kUserAgent);
+    http.setConnectTimeout(static_cast<int32_t>(cfg::kConnectTimeoutMs));
+    http.setTimeout(static_cast<uint16_t>(cfg::kHttpTimeoutMs));
+
+    if (!http.begin(client, url)) {
+        weather_util::copyUtf8Trunc(err, cfg::kErrorBytes, "net");
+    } else {
+        const int code = http.GET();
+        ram.sample();  // з'єднання встановлено, заголовки прочитано (для HTTPS тут пік RAM TLS)
+        if (code != HTTP_CODE_OK) {
+            classifyError(code, sec, millis() - t0, err);
+        } else {
+            // Тіло: chunked або Content-Length — розбирає HTTPClient::writeToStream.
+            CapSink sink(s_resp, cfg::kMaxResponseBytes - 1);
+            const int ret = http.writeToStream(&sink);
+            ram.sample();
+            if (ret < 0 || sink.overflow()) {
+                classifyError(sink.overflow() ? HTTPC_ERROR_STREAM_WRITE : ret, sec, millis() - t0, err);
+            } else if (sink.count() == 0) {
+                weather_util::copyUtf8Trunc(err, cfg::kErrorBytes, "parse");
+            } else {
+                outLen = sink.count();
+                s_resp[outLen] = '\0';
+                ok = true;
+            }
+        }
+        http.end();
+    }
+    return ok;
+}
+
+// Один запит із заданим транспортом: hostPath (без схеми) -> s_resp (NUL-термінований).
+// true — HTTP 200 і тіло прийнято; інакше err.
+bool fetchOnce(bool https, const char* hostPath, char* err, size_t& outLen) {
     outLen = 0;
     if (s_resp == nullptr) {
         weather_util::copyUtf8Trunc(err, cfg::kErrorBytes, "low_memory");
         return false;
     }
+    const int n = snprintf(s_urlFull, sizeof(s_urlFull), "%s://%s", https ? "https" : "http", hostPath);
+    if (n <= 0 || static_cast<size_t>(n) >= sizeof(s_urlFull)) {
+        weather_util::copyUtf8Trunc(err, cfg::kErrorBytes, "parse");
+        return false;
+    }
 
     const uint32_t t0 = millis();
-    const size_t freeBefore = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
-    size_t freeDuring = freeBefore;
+    RamStat ram;
+    ram.begin();
     bool ok = false;
-    {
-        NetworkClientSecure client;
+    if (https) {
+        NetworkClientSecure client;  // TLS-клас створюється ЛИШЕ в HTTPS-гілці
         applyTrust(client);
         client.setHandshakeTimeout(cfg::kHandshakeTimeoutS);
+        ok = runGet(client, &client, s_urlFull, t0, ram, err, outLen);
+    } else {
+        NetworkClient client;
+        ok = runGet(client, nullptr, s_urlFull, t0, ram, err, outLen);
+    }  // client / http знищено: пам'ять запиту звільнено
+    ram.sample();
 
-        HTTPClient http;
-        http.setReuse(false);
-        http.setUserAgent(cfg::kUserAgent);
-        http.setConnectTimeout(static_cast<int32_t>(cfg::kConnectTimeoutMs));
-        http.setTimeout(static_cast<uint16_t>(cfg::kHttpTimeoutMs));
-
-        if (!http.begin(client, url)) {
-            weather_util::copyUtf8Trunc(err, cfg::kErrorBytes, "net");
-        } else {
-            const int code = http.GET();
-            // Сесія TLS і буфери mbedTLS живі саме зараз: це найнижча вільна RAM запиту.
-            freeDuring = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
-            if (code != HTTP_CODE_OK) {
-                classifyError(code, client, millis() - t0, err);
-            } else {
-                CapSink sink(s_resp, cfg::kMaxResponseBytes - 1);
-                const int ret = http.writeToStream(&sink);
-                if (ret < 0 || sink.overflow()) {
-                    classifyError(sink.overflow() ? HTTPC_ERROR_STREAM_WRITE : ret, client, millis() - t0, err);
-                } else if (sink.count() == 0) {
-                    weather_util::copyUtf8Trunc(err, cfg::kErrorBytes, "parse");
-                } else {
-                    outLen = sink.count();
-                    s_resp[outLen] = '\0';
-                    ok = true;
-                }
-            }
-            http.end();
-        }
-    }  // client / http знищено: пам'ять TLS звільнено
-
-    WX_LOG("tls heap: before=%u during=%u after=%u minEver=%u stackHW=%u ms=%u %s%s",
-           static_cast<unsigned>(freeBefore), static_cast<unsigned>(freeDuring),
-           static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
-           static_cast<unsigned>(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL)),
-           static_cast<unsigned>(uxTaskGetStackHighWaterMark(nullptr)),
-           static_cast<unsigned>(millis() - t0), ok ? "ok" : "err=", ok ? "" : err);
+#if WEATHER_DEBUG || WEATHER_TEST
+    {
+        const size_t needFree = https ? cfg::kMinFreeHeap : cfg::kMinFreeHeapHttp;
+        Serial.printf("[WX] net %s ms=%u free before=%u min=%u after=%u used=%u margin=%d %s%s\n",
+                      https ? "https" : "http", static_cast<unsigned>(millis() - t0),
+                      static_cast<unsigned>(ram.freeBefore), static_cast<unsigned>(ram.freeMin),
+                      static_cast<unsigned>(freeInternal()),
+                      static_cast<unsigned>(ram.freeBefore - ram.freeMin),
+                      static_cast<int>(static_cast<long>(ram.freeBefore) - static_cast<long>(needFree)),
+                      ok ? "ok" : "err=", ok ? "" : err);
+#if WEATHER_TEST
+        Serial.printf("[WX] net largest before=%u min=%u after=%u need=%u/%u minEver=%u stackHW=%u\n",
+                      static_cast<unsigned>(ram.largestBefore), static_cast<unsigned>(ram.largestMin),
+                      static_cast<unsigned>(largestInternal()),
+                      static_cast<unsigned>(needFree),
+                      static_cast<unsigned>(https ? cfg::kMinLargestBlock : cfg::kMinLargestBlockHttp),
+                      static_cast<unsigned>(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL)),
+                      static_cast<unsigned>(uxTaskGetStackHighWaterMark(nullptr)));
+#endif
+    }
+#endif
     return ok;
+}
+
+// GET по транспорту з конфігурації. Якщо HTTP дав перенаправлення ("redirect") і дозволено запасний варіант
+// (kHttpsFallback), ОДИН раз пробує HTTPS — лише якщо вільної RAM вистачає за порогами HTTPS.
+bool fetchJson(const char* hostPath, char* err, size_t& outLen) {
+    const bool ok = fetchOnce(cfg::kUseHttps, hostPath, err, outLen);
+    if (ok || cfg::kUseHttps || !cfg::kHttpsFallback || strcmp(err, "redirect") != 0) return ok;
+
+    if (!heapEnough(true)) {
+        WX_LOG("redirect: https fallback skipped (low memory)");  // err лишається "redirect"
+        return false;
+    }
+    WX_LOG("redirect: trying https once");
+    char err2[cfg::kErrorBytes] = {0};
+    if (fetchOnce(true, hostPath, err2, outLen)) return true;
+    weather_util::copyUtf8Trunc(err, cfg::kErrorBytes, err2);  // повідомляємо помилку HTTPS-спроби
+    return false;
 }
 
 // --- Пошук міста ---------------------------------------------------------------------------------

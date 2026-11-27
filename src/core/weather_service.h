@@ -9,8 +9,9 @@
 // м'ютекс на кілька мікросекунд (таймаут weather_cfg::kLockWaitMs), команди лише ставлять запит у
 // чергу / прапорець. Тому безпечні з будь-якої задачі, зокрема з обробників async_tcp й дисплея.
 //
-// Запити стартують лише коли Wi-Fi підключено, TimeService::isValid() (потрібен час для перевірки
-// сертифікатів) і вистачає вільної внутрішньої RAM (weather_cfg::kMinFreeHeap / kMinLargestBlock).
+// Запити стартують лише коли Wi-Fi підключено, TimeService::isValid() і вистачає вільної внутрішньої
+// RAM: [S2b2] для HTTP (за замовчуванням) — weather_cfg::kMinFreeHeapHttp / kMinLargestBlockHttp,
+// для HTTPS — kMinFreeHeap / kMinLargestBlock. Транспорт — weather_cfg::kUseHttps (дефолт false).
 // Місце «не задано» = немає запису в NVS. Settings і kFormatVersion не чіпаються.
 
 #include <stddef.h>
