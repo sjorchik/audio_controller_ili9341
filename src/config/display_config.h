@@ -130,6 +130,12 @@ constexpr uint8_t kFontDigitsPx = 131;
 // tools/gen_xlarge_font.py, em = 30, DejaVu Sans, той самий набір символів, що й Large).
 // Значення — yAdvance згенерованого шрифту (звіряє static_assert у ui/fonts.cpp).
 constexpr uint8_t kFontXLargePx = 36;
+// [S2c0] FontSize::Clock — час HH:MM основного екрана 320x240 (ui/font_clock_data.h,
+// tools/gen_clock_font.py, em = 47, DejaVu Sans). Лише символи '0'..'9', ':' і '-'.
+// Значення — yAdvance згенерованого шрифту (звіряє static_assert у ui/fonts.cpp).
+// Висота цифри 34..36 px, відступ від верху рядка до верху цифри 9..10 px,
+// нижче бази 12 px: малювати за верхом цифри, а не за верхом рядка шрифту.
+constexpr uint8_t kFontClockPx = 56;
 
 // ---------------------------------------------------------------------------
 // Іконки: 1-бітна маска kIconSize × kIconSize, рядки по (kIconSize+7)/8 байт,
