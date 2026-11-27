@@ -53,6 +53,7 @@
 #include "core/settings.h"       // [Prompt 6] ДОДАНО
 #include "core/settings_test.h"  // [Prompt 6] ДОДАНО
 #include "core/time_service.h"  // [S2a] ДОДАНО
+#include "core/weather_service.h"  // [S2b] ДОДАНО
 #include "input/buttons.h"
 #include "input/encoder.h"
 #include "input/ir_rc5.h"  // [Prompt 2] ДОДАНО
@@ -254,6 +255,14 @@ static void initTime() {
     }
 }
 
+// [S2b] ДОДАНО: сервіс погоди (Open-Meteo). begin() читає збережене місто з NVS і створює
+// одну низькопріоритетну задачу на ядрі 0; мережа лише в ній, коли є Wi-Fi і дійсний час.
+static void initWeather() {
+    if (!WeatherService::begin()) {
+        Serial.println("[MAIN] Weather service init failed");
+    }
+}
+
 // [Prompt 8] ДОДАНО: AppController. Останній з модулів, від яких він залежить
 // (EventBus, Settings, input_selector, плеєр, line_path). [P48a] begin() без параметрів.
 static void initAppController() {
@@ -399,6 +408,9 @@ void setup() {
 
     // [S2a] ДОДАНО: сервіс часу після Wi-Fi.
     initTime();
+
+    // [S2b] ДОДАНО: сервіс погоди після Wi-Fi і часу.
+    initWeather();
 
     // [Prompt 44] ДОДАНО. [Prompt 47c] ПЕРЕНЕСЕНО ПЕРЕД AppController: begin() проходу має відбутись до першого
     // powerOnTransition() контролера (стартує на зовнішньому вході й одразу керує LinePath).

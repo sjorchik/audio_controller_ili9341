@@ -56,6 +56,7 @@
 #include "net/web_api_player.h"   // [Prompt 18] registerPlayerRoutes()
 #include "net/web_api_system.h"   // [Prompt 18] registerSystemRoutes()
 #include "net/web_api_time.h"     // [S2a] registerTimeRoutes()
+#include "net/web_api_weather.h"  // [S2b] registerWeatherRoutes()
 #include "net/web_static.h"       // [Prompt 19] registerStaticRoutes()
 #include "net/wifi_manager.h"
 #include "stations/station_store.h"  // [Prompt 14]
@@ -1533,6 +1534,7 @@ void registerRoutes(AsyncWebServer& server) {
     registerPlayerRoutes(server);  // [P48a]
     registerSystemRoutes(server);
     registerTimeRoutes(server);    // [S2a] GET /api/time
+    registerWeatherRoutes(server); // [S2b] /api/weather*
 
     // [Prompt 19] Вбудований веб-інтерфейс (GET /, /index.html, /css/*, /js/*...). Останнім
     // серед маршрутів: /api/* вже зареєстровані й виграють; onNotFound не чіпаємо.
