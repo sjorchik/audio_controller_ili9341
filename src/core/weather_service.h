@@ -30,6 +30,8 @@ public:
         float windMs;         // м/с, 1 знак
         uint8_t humidity;     // %
         uint32_t fetchedAtMs; // millis() у момент отримання
+        uint16_t pressureHpa; // [S2b3] гПа (рівень моря), ціле; 0 = немає даних
+        int16_t windDirDeg;   // [S2b3] напрямок «звідки», 0..359; -1 = немає даних
     };
 
     // Вибране місце. name — UTF-8, до 31 байта.

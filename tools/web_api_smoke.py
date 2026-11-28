@@ -363,6 +363,23 @@ def read_checks(d):
     expect("GET /api/eq?input=-1 -> 400", d.get("/api/eq?input=-1"), 400, ["error"], "out_of_range")
     expect("GET /api/eq?input=x -> 400", d.get("/api/eq?input=x"), 400, ["error"], "invalid_value")
 
+    # --- GET /api/weather (S2b3): усі поля присутні завжди; тиск (гПа) і напрям вітру — число або null ---
+    wx_keys = ["configured", "city", "lat", "lon", "valid", "tempC", "code", "isDay", "windMs", "humidity",
+               "pressureHpa", "windDirDeg", "condition", "ageMs", "error"]
+    okw, wx = expect("GET /api/weather", d.get("/api/weather"), 200, wx_keys)
+    if okw:
+        p, w = wx["pressureHpa"], wx["windDirDeg"]
+        record("weather.pressureHpa: ціле 300..1100 (гПа) або null",
+               p is None or (_is_int(p) and 300 <= p <= 1100), "pressureHpa=%r" % (p,))
+        record("weather.windDirDeg: ціле 0..359 або null",
+               w is None or (_is_int(w) and 0 <= w <= 359), "windDirDeg=%r" % (w,))
+        if wx["valid"] is not True:
+            record("weather: !valid -> pressureHpa і windDirDeg == null", p is None and w is None,
+                   "pressureHpa=%r windDirDeg=%r" % (p, w))
+        else:
+            record("weather: valid -> pressureHpa і windDirDeg не null (інакше джерело не віддало)",
+                   p is not None and w is not None, "pressureHpa=%r windDirDeg=%r" % (p, w), skip=(p is None or w is None))
+
     # --- видалені маршрути ---
     expect("GET /api/gain -> 404", d.get("/api/gain"), 404, ["error"], "not_found")
 

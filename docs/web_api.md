@@ -1054,6 +1054,7 @@ HTTPS. HTTPS лишено як опцію прошивки (`weather_cfg::kUseHt
 ```json
 {"configured": true, "city": "Київ", "lat": 50.4547, "lon": 30.5238,
  "valid": true, "tempC": 3.4, "code": 3, "isDay": true, "windMs": 2.1, "humidity": 81,
+ "pressureHpa": 1015, "windDirDeg": 250,
  "condition": "cloudy", "ageMs": 120000, "error": null}
 ```
 
@@ -1067,6 +1068,8 @@ HTTPS. HTTPS лишено як опцію прошивки (`weather_cfg::kUseHt
 | `isDay` | bool \| `null` | день / ніч у місці |
 | `windMs` | число \| `null` | швидкість вітру, м/с, 1 знак |
 | `humidity` | ціле \| `null` | відносна вологість, % |
+| `pressureHpa` | ціле \| `null` | [S2b3] атмосферний тиск, приведений до рівня моря (`pressure_msl`), гПа; `null` також, якщо джерело не віддало значення (при цьому `valid` лишається `true`) |
+| `windDirDeg` | ціле \| `null` | [S2b3] напрямок вітру «звідки» (метеорологічний), градуси 0…359 (0 = північний; вітер дме в протилежний бік); `null`, якщо джерело не віддало значення |
 | `condition` | рядок \| `null` | `clear`, `partly_cloudy`, `cloudy`, `fog`, `drizzle`, `rain`, `snow`, `thunder`, `unknown` |
 | `ageMs` | ціле \| `null` | мс від останнього успішного отримання |
 | `error` | рядок \| `null` | код ОСТАННЬОЇ помилки оновлення; скидається успіхом або зміною міста |

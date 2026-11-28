@@ -69,6 +69,16 @@ void handleWeatherGet(AsyncWebServerRequest* req) {
         doc["isDay"] = st.cur.isDay;
         doc["windMs"] = weather_util::round1d(st.cur.windMs);
         doc["humidity"] = st.cur.humidity;
+        if (st.cur.pressureHpa > 0) {  // [S2b3] 0 = немає даних -> null
+            doc["pressureHpa"] = st.cur.pressureHpa;
+        } else {
+            doc["pressureHpa"] = nullptr;
+        }
+        if (st.cur.windDirDeg >= 0) {  // [S2b3] -1 = немає даних -> null
+            doc["windDirDeg"] = st.cur.windDirDeg;
+        } else {
+            doc["windDirDeg"] = nullptr;
+        }
         doc["condition"] = weather::conditionName(weather::category(st.cur.code, st.cur.isDay));
         doc["ageMs"] = st.ageMs;
     } else {
@@ -77,6 +87,8 @@ void handleWeatherGet(AsyncWebServerRequest* req) {
         doc["isDay"] = nullptr;
         doc["windMs"] = nullptr;
         doc["humidity"] = nullptr;
+        doc["pressureHpa"] = nullptr;  // [S2b3]
+        doc["windDirDeg"] = nullptr;   // [S2b3]
         doc["condition"] = nullptr;
         doc["ageMs"] = nullptr;
     }

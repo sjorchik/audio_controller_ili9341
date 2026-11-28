@@ -138,8 +138,8 @@ struct WeatherView {
     int16_t temp;    // °C, округлено
     int16_t windDm;  // вітер, дм/с (м/с * 10)
     uint8_t humidity;   // %
-    uint16_t pressureHpa;   // гПа; 0 = немає даних (сервіс ще не віддає)
-    int16_t  windDirDeg;    // напрямок «звідки», 0..359; -1 = немає даних (сервіс ще не віддає)
+    uint16_t pressureMm;    // [S2b3] мм рт. ст. (з гПа сервісу); 0 = немає даних
+    int16_t  windDirDeg;    // напрямок «звідки», 0..359; -1 = немає даних
     uint8_t cond;    // weather::Condition
     char    city[weather_cfg::kNameBytes];
 };
@@ -339,10 +339,11 @@ bool weatherUpdate(uint32_t now) {
         if (wd > 999) wd = 999;
         v.windDm    = static_cast<int16_t>(wd);
         v.humidity  = st.cur.humidity > 100 ? 100 : st.cur.humidity;
-        // ТИСК І НАПРЯМ ВІТРУ: WeatherService::Current їх ще не має. Коли додасте поля — підставити тут:
-        //   v.pressureHpa = <гПа>;   v.windDirDeg = <градуси 0..359>;
-        v.pressureHpa = 0;
-        v.windDirDeg  = -1;
+        // [S2b3] Тиск: сервіс віддає гПа (0 = немає даних), екран показує мм рт. ст.
+        v.pressureMm  = (st.cur.pressureHpa > 0)
+                            ? static_cast<uint16_t>(lroundf(st.cur.pressureHpa * weather_cfg::kHpaToMmHg))
+                            : 0;
+        v.windDirDeg  = st.cur.windDirDeg;
         v.isDay = st.cur.isDay;
         v.cond  = static_cast<uint8_t>(weather::category(st.cur.code, st.cur.isDay));
         v.stale = (st.ageMs != WeatherService::kNoAge) && (st.ageMs > ml::kWeatherStaleMs);
@@ -701,13 +702,13 @@ void drawWeatherBlock() {
     D::drawText(wind, windTextX, ml::kStateY, FontSize::Tiny, cExtra);
     const int32_t windEnd = windTextX + sw;
 
-    char pres[16];
-    if (w.pressureHpa > 0) snprintf(pres, sizeof(pres), "%u %s", static_cast<unsigned>(w.pressureHpa), ua_text::kUnitPressure);
+    char pres[24];   // [S2b3] "760 мм рт. ст." = 20 байт UTF-8 + NUL (було 16 для «гПа»)
+    if (w.pressureMm > 0)  snprintf(pres, sizeof(pres), "%u %s", static_cast<unsigned>(w.pressureMm), ua_text::kUnitPressure);
     else                   snprintf(pres, sizeof(pres), "%s %s", ua_text::kPressureUnknown, ua_text::kUnitPressure);
     const int32_t pw = UiFonts::textWidth(pres, FontSize::Tiny);
     const int32_t presX = ml::kRightX - pw;
     D::drawText(pres, static_cast<int16_t>(presX), ml::kStateY, FontSize::Tiny,
-                (w.pressureHpa > 0) ? cExtra : ml::kColorWxStale);
+                (w.pressureMm > 0) ? cExtra : ml::kColorWxStale);
 
     char hum[8];
     snprintf(hum, sizeof(hum), "%u%%", static_cast<unsigned>(w.humidity));

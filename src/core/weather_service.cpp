@@ -55,7 +55,7 @@ WeatherService::Location s_loc = {false, {0}, 0.0f, 0.0f};
 uint32_t s_locGen = 0;  // зростає при кожній зміні / очищенні місця: відкидає запізнілі відповіді
 
 bool s_hasData = false;
-WeatherService::Current s_cur = {0.0f, 0, true, 0.0f, 0, 0};
+WeatherService::Current s_cur = {0.0f, 0, true, 0.0f, 0, 0, 0, -1};
 char s_error[cfg::kErrorBytes] = {0};
 
 WeatherService::SearchState s_search = {};
@@ -548,6 +548,23 @@ void doSearch(const char* query) {
 }
 
 // --- Оновлення погоди -----------------------------------------------------------------------------
+// [S2b3] Необов'язкові поля: null / не число / поза межами -> «немає даних» (0 / -1), НЕ помилка parse.
+uint16_t parsePressureHpa(JsonVariantConst v) {
+    if (!v.is<float>()) return 0;
+    const float p = v.as<float>();
+    if (!weather_util::inRange(p, cfg::kPressureMinHpa, cfg::kPressureMaxHpa)) return 0;
+    return static_cast<uint16_t>(lroundf(p));
+}
+
+int16_t parseWindDirDeg(JsonVariantConst v) {
+    if (!v.is<float>()) return -1;
+    const float d = v.as<float>();
+    if (!weather_util::inRange(d, 0.0f, cfg::kWindDirMaxDeg)) return -1;
+    long r = lroundf(d);
+    if (r >= 360) r = 0;  // 359.5..360 -> 0
+    return static_cast<int16_t>(r);
+}
+
 enum class RefreshResult : uint8_t { Ok, Blocked, LowMemory, Failed, Discarded };
 
 RefreshResult doRefresh() {
@@ -589,6 +606,8 @@ RefreshResult doRefresh() {
     fc["is_day"] = true;
     fc["wind_speed_10m"] = true;
     fc["relative_humidity_2m"] = true;
+    fc["pressure_msl"] = true;        // [S2b3]
+    fc["wind_direction_10m"] = true;  // [S2b3]
 
     JsonDocument doc;
     const DeserializationError de = deserializeJson(doc, s_resp, len, DeserializationOption::Filter(filter));
@@ -625,6 +644,8 @@ RefreshResult doRefresh() {
     cur.windMs = weather_util::round1(wind);
     cur.humidity = static_cast<uint8_t>(lroundf(hum));
     cur.fetchedAtMs = millis();
+    cur.pressureHpa = parsePressureHpa(c["pressure_msl"]);        // [S2b3]
+    cur.windDirDeg = parseWindDirDeg(c["wind_direction_10m"]);    // [S2b3]
 
     {
         Lock lk;
@@ -638,8 +659,10 @@ RefreshResult doRefresh() {
         s_hasDataFlag.store(true);
         s_error[0] = '\0';
     }
-    WX_LOG("refresh ok: %.1f C code=%d day=%d wind=%.1f m/s hum=%u%%", static_cast<double>(cur.tempC),
-           code, isDay, static_cast<double>(cur.windMs), static_cast<unsigned>(cur.humidity));
+    WX_LOG("refresh ok: %.1f C code=%d day=%d wind=%.1f m/s dir=%d hum=%u%% pres=%u hPa",
+           static_cast<double>(cur.tempC), code, isDay, static_cast<double>(cur.windMs),
+           static_cast<int>(cur.windDirDeg), static_cast<unsigned>(cur.humidity),
+           static_cast<unsigned>(cur.pressureHpa));
     return RefreshResult::Ok;
 }
 

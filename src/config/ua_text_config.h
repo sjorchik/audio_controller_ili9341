@@ -34,8 +34,8 @@ constexpr const char* kNoWeatherData = "Немає даних";     // міст�
 constexpr const char* kTempUnknown   = "--";              // перед kDegree
 constexpr const char* kDegree        = "°";
 constexpr const char* kUnitWind   = "м/с";
-constexpr const char* kUnitPressure   = "гПа";
-constexpr const char* kPressureUnknown = "---";   // тиску ще немає в даних сервісу
+constexpr const char* kUnitPressure   = "мм";   // [S2b3] екран показує мм рт. ст. (API — гПа)
+constexpr const char* kPressureUnknown = "---";   // немає даних про тиск
 constexpr const char* kSeparator     = " · ";             // зарезервовано (рядок «Місто · стан» розбито на два)
 
 constexpr const char* kSourceExternal = "Вхід";           // тег джерела для Computer / Aux / Player

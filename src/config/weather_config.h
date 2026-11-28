@@ -99,7 +99,8 @@ constexpr const char* kUserAgent = "AudioController-Weather/1.0";
 // kUseHttps / запасного варіанту [S2b2]. Формат: широта, довгота (%.4f).
 constexpr const char* kForecastUrlFmt =
     "api.open-meteo.com/v1/forecast?latitude=%.4f&longitude=%.4f"
-    "&current=temperature_2m,weather_code,is_day,wind_speed_10m,relative_humidity_2m"
+    "&current=temperature_2m,weather_code,is_day,wind_speed_10m,relative_humidity_2m,"
+    "pressure_msl,wind_direction_10m"
     "&wind_speed_unit=ms&timezone=auto";
 
 // Формат: URL-кодований запит, кількість кандидатів (теж без схеми).
@@ -129,6 +130,16 @@ constexpr size_t kErrorBytes = 16;      // код помилки ("http_503", "r
 constexpr float kTempMinC = -90.0f;
 constexpr float kTempMaxC = 70.0f;
 constexpr float kWindMaxMs = 150.0f;
+
+// [S2b3] Тиск (pressure_msl, гПа, приведений до рівня моря) і напрям вітру (wind_direction_10m, градуси
+// «звідки»). На відміну від полів вище, значення поза межами або null НЕ дають помилку parse:
+// це поле просто «немає даних» (pressureHpa = 0, windDirDeg = -1), решта відповіді лишається valid.
+constexpr float kPressureMinHpa = 300.0f;
+constexpr float kPressureMaxHpa = 1100.0f;
+constexpr float kWindDirMaxDeg = 360.0f;  // 0..360 включно; 360 нормалізується в 0
+
+// [S2b3] Перерахунок гПа -> мм рт. ст. ЛИШЕ для екрана (ui/screens.cpp); API лишається в гПа.
+constexpr float kHpaToMmHg = 0.750062f;
 
 // --- NVS (окремо від Settings; kFormatVersion = 11 не чіпається) ---------------------------------
 constexpr const char* kNvsNamespace = "wx";
