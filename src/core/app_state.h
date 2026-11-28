@@ -28,9 +28,8 @@
 // [Prompt 28] ДОДАНО: offline та restarting (лише в кінець структури). offline — режим без мережі
 // (Wi-Fi вимкнено, радіо недоступне); restarting — іде «тихий» перезапуск контролера (екран
 // показує «Restarting...»). Обидва false за замовчуванням; публікує AppController.
-// [Prompt 32] ДОДАНО: popupTarget, popupSeq (лише в кінець структури) — подія «показати спливне вікно
-// параметра звуку». popupSeq збільшує (з переходом 255 -> 0) ЛИШЕ AppController на ЛОКАЛЬНІ зміни
-// (енкодер, кнопки, IR); веб-команди його не чіпають. Відлік показу (kPopupTimeoutMs) веде ui/screens.
+// [S2c2b] ВИДАЛЕНО: popupTarget, popupSeq (P32) і popupDismissed (P49d) — спливні вікна гучності / балансу
+// прибрано за рішенням власника; поля ніхто більше не читав і не писав.
 // [Prompt 36] ДОДАНО: wifiRssi (лише в кінець структури) — рівень сигналу поточної STA-мережі, дБм,
 // квантований кроком wifi_status_cfg::kRssiQuantDb; 0 = невідомо / не підключено. Публікує
 // AppController разом з іншими даними Wi-Fi (syncPlayer); ui/screens з нього виводить іконку Wi-Fi.
@@ -174,12 +173,6 @@ struct AppStateData {
     // true: триває «тихий» перезапуск (мʼют -> підсилювач LOW -> ESP.restart()).
     bool restarting;
 
-    // --- [Prompt 32] ДОДАНО ---
-    // Параметр, який показує спливне вікно (осмислений, коли popupSeq змінився).
-    AdjustTarget popupTarget;
-    // Лічильник подій «показати вікно»; UI порівнює з попереднім баченим значенням.
-    uint8_t popupSeq;
-
     // --- [Prompt 36] ДОДАНО ---
     // RSSI поточної STA-мережі, дБм (від'ємне, кратне kRssiQuantDb); 0 — невідомо або не підключено.
     int8_t wifiRssi;
@@ -199,13 +192,6 @@ struct AppStateData {
     // eqGainsDb = пресет EQ АКТИВНОГО входу, дБ (eq_cfg::kGainMinDb..kGainMaxDb). Лише AppController пише.
     uint8_t eqSelected;
     int8_t eqGainsDb[eq_cfg::kBandCount];
-
-    // --- [Prompt 49d] ДОДАНО (в кінець структури) ---
-    // true: спливне вікно (гучність / баланс) треба сховати негайно — користувач натиснув кнопку / клікнув
-    // енкодер / натиснув кнопку IR (крім дій, що самі показують вікно). Це РІВЕНЬ, а не подія: UI не плутає
-    // порядок «показати» / «сховати» в межах одного кадру. Скидається в false, коли AppController знову
-    // показує вікно (notifyPopup). Лише AppController пише.
-    bool popupDismissed;
 
     // --- [V1] ДОДАНО (в кінець структури) ---
     // Чутливість VU активного входу, дБ (vu_sens_cfg::kMinDb..kMaxDb; 0 = без зсуву). Лише AppController пише.

@@ -100,8 +100,8 @@
 // (пін LOW через kAmpOffDelayMs, P23c) -> пауза kRestartMuteMs -> ESP.restart(). Усе кроками
 // restartService() із tickLocked(), без блокувань; kRestartMaxWaitMs — страховка.
 
-// [Prompt 32] Спливне вікно параметра: notifyPopup()/popupForEvent() у handleLocked() (лише локальні
-// джерела: енкодер, кнопки, IR); AppState.popupTarget/popupSeq. Веб (runWebCommand) вікно не викликає.
+// [S2c2b] Спливні вікна гучності / балансу прибрано (рішення власника): notifyPopup() / popupForEvent() і поля
+// AppState popupTarget / popupSeq / popupDismissed видалено.
 // [Prompt 31] Автоповернення цілі регулювання енкодера на гучність. Будь-яка подія енкодера
 // (ENC_CW / ENC_CCW / ENC_PRESS, зокрема довге утримання = мʼют) оновлює s_lastEncMs; коли
 // s_target != Volume і від останньої події енкодера минуло (константа kAdjustTimeoutMs ВИДАЛЕНА в P48c; ціль завжди Volume), tickLocked()
@@ -306,11 +306,6 @@ uint8_t s_eqSel = eq_screen_cfg::kDefaultSelected;
 uint32_t s_eqLastActionMs = 0;
 int8_t s_balance = balance_cfg::kDefaultDb;    // [Prompt 48b] баланс АКТИВНОГО входу, дБ (профіль входу s_input)
 int8_t s_vuSens = vu_sens_cfg::kDefaultDb;     // [V1] чутливість VU АКТИВНОГО входу, дБ (профіль входу s_input)
-// [Prompt 32] Подія «показати спливне вікно параметра»: що показувати і лічильник подій.
-// Лічильник росте лише на ЛОКАЛЬНІ зміни (handleLocked); веб-команди (runWebCommand) його не чіпають.
-AdjustTarget s_popupTarget = AdjustTarget::Volume;
-uint8_t s_popupSeq = 0;
-bool s_popupDismissed = false;  // [Prompt 49d] true: UI має негайно сховати вікно (рівень, див. AppStateData::popupDismissed)
 MenuContext s_menuCtx = MenuContext::None;
 uint16_t s_menuSel = 0;
 
@@ -946,14 +941,11 @@ struct PubCtx {
     uint16_t menuSel;
     bool offline;     // [Prompt 28]
     bool restarting;  // [Prompt 28]
-    AdjustTarget popupTarget;  // [Prompt 32]
-    uint8_t popupSeq;          // [Prompt 32]
     uint8_t inputEnabledMask;  // [Prompt 39]
     int8_t balanceDb;          // [Prompt 48b]
     uint8_t eqSelected;                      // [Prompt 49a]
     int8_t eqGainsDb[eq_cfg::kBandCount];    // [Prompt 49a]
     char inputName[kInputNameMax];  // [Prompt 23b]
-    bool popupDismissed;            // [Prompt 49d]
     int8_t vuSensDb;                // [V1]
 };
 
@@ -969,9 +961,6 @@ void applyPub(AppStateData& s, void* c) {
     s.menuSelection = p->menuSel;
     s.offline = p->offline;        // [Prompt 28]
     s.restarting = p->restarting;  // [Prompt 28]
-    s.popupTarget = p->popupTarget;  // [Prompt 32]
-    s.popupSeq = p->popupSeq;        // [Prompt 32]
-    s.popupDismissed = p->popupDismissed;  // [Prompt 49d]
     s.inputEnabledMask = p->inputEnabledMask;  // [Prompt 39]
     s.balanceDb = p->balanceDb;                // [Prompt 48b]
     s.eqSelected = p->eqSelected;              // [Prompt 49a]
@@ -983,9 +972,8 @@ void applyPub(AppStateData& s, void* c) {
 void publishState() {
     PubCtx p = {s_mode,        s_input,   s_volume,  s_userMute, s_station,
                 s_target,      s_menuCtx, s_menuSel, s_offline,  restarting(),
-                s_popupTarget, s_popupSeq, s_inputMask, s_balance};
+                s_inputMask, s_balance};
     resolveInputName(s_input, p.inputName, sizeof(p.inputName));  // [Prompt 23b]
-    p.popupDismissed = s_popupDismissed;                          // [Prompt 49d]
     p.vuSensDb = s_vuSens;                                        // [V1]
     // [Prompt 49a] Поки відкритий екран «EQ + баланс» — вибраний параметр і пресет EQ активного входу (з Settings:
     // джерело правди, тож зміна з вебу теж видна); інакше нулі.
@@ -2428,41 +2416,6 @@ void restartService(uint32_t now) {
     }
 }
 
-// [Prompt 32] Спливне вікно параметра. notifyPopup() лише фіксує, ЩО показати, і збільшує лічильник;
-// публікація — publishState() наприкінці handleLocked(). Непідтримуваний чипом параметр не
-// показуємо (значення 0 вводило б в оману).
-void notifyPopup(AdjustTarget t) {
-    if (!targetSupported(t)) {
-        return;
-    }
-    s_popupTarget = t;
-    s_popupDismissed = false;  // [Prompt 49d] нове показ скасовує попереднє «сховати»
-    ++s_popupSeq;  // uint8_t: перехід 255 -> 0 штатний, UI порівнює лише «змінилось чи ні»
-}
-
-// Викликається ПІСЛЯ обробки події і лише на головних екранах (Radio / ExternalInput).
-// Енкодер: обертання показує гучність ([Prompt 49a]: ціль завжди Volume). Натискання енкодера (коротке = мʼют,
-// довге = екран «EQ + баланс») вікно НЕ викликає: мʼют видно за іконкою. Прямі дії кнопок/IR показують свій параметр.
-void popupForEvent(const Event& e) {
-    switch (e.action) {
-        case Action::ENC_CW:
-        case Action::ENC_CCW:
-            notifyPopup(AdjustTarget::Volume);
-            break;
-        case Action::VOL_UP:
-        case Action::VOL_DOWN:     notifyPopup(AdjustTarget::Volume);  break;
-        case Action::BALANCE_UP:   // [Prompt 48b] екран (P49) малює Balance за AppState.popupTarget
-        case Action::BALANCE_DOWN: notifyPopup(AdjustTarget::Balance); break;
-        default:
-            // [Prompt 49d] Будь-яка інша кнопка / клік енкодера / кнопка IR гасить вікно одразу; сама дія вже
-            // виконана вище (handleLocked) — закриття лише додатковий ефект. Веб сюди не потрапляє.
-            if (e.source != EventSource::WEB) {
-                s_popupDismissed = true;
-            }
-            break;
-    }
-}
-
 void handleLocked(const Event& e) {
 #if APP_CONTROLLER_LOG_EVENTS && APP_CONTROLLER_DEBUG
     Serial.printf("[APP] evt %s %s%s%s delta=%d\n", sourceName(e.source), actionName(e.action),
@@ -2557,10 +2510,6 @@ void handleLocked(const Event& e) {
                 } else {
                     handleMainEvent(e);
                 }
-            }
-            // [Prompt 32] Спливне вікно: лише головні екрани (у Menu енкодер рухає список).
-            if (s_mode == Mode::Radio || s_mode == Mode::ExternalInput) {
-                popupForEvent(e);
             }
         }
     }

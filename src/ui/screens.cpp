@@ -10,6 +10,7 @@
 #include "config/eq_config.h"          // [Prompt 49a] eq_cfg::kBandCount / kBandFreqHz (тимчасовий екран EQ)
 #include "config/eq_screen_config.h"   // [Prompt 49a/49b] розкладка екрана EQ + Balance
 #include "config/screens_config.h"
+#include "config/station_list_config.h"   // [S2c2b] розкладка екрана «Список станцій»
 #include "audio/vu_source.h"      // [Prompt 17] рівні VU (читаються напряму); [Prompt 48d] + VuSourceLinePath
 #include "config/features.h"
 #include "config/line_path_config.h"  // [Prompt 48d] LINE_PATH_ENABLE (раніше приходив через adc_vu.h)
@@ -41,9 +42,8 @@
 // по межі UTF-8-символу.
 // [Prompt 28] AppState.offline: замість Wi-Fi-індикатора у верхній панелі — текст "offline" (Tiny);
 // на екрані WifiSetup — підказка "OK: work offline"; AppState.restarting — екран "Restarting...".
-// [Prompt 32] Спливне вікно параметра: UI веде ЛИШЕ відлік показу (millis() від моменту, коли
-// AppState.popupSeq змінився); сам параметр і його значення читаються зі знімка AppState.
-// Статус-рядок з ціллю енкодера (drawStatusRow) прибрано.
+// [S2c2b] Спливні вікна гучності / балансу прибрано (рішення власника): гучність видно лише на основному екрані,
+// баланс — лише на екрані EQ + Balance. Статус-рядок з ціллю енкодера (drawStatusRow) прибрано.
 // [Prompt 33] Екран Radio: назву входу прибрано; рядок метаданих і рядок статусу потоку обʼєднано
 // в один (слот kTrackY, marquee s_track): метадані, коли Playing і вони непорожні, інакше статус.
 // [Prompt 34] VU перемальовано під індикатор «Маяк-233» (сегментні смуги L/R, шкала в дБ, утримання
@@ -75,8 +75,10 @@
 // (рішення власника 2026-11-27); «Restarting...», EQ, список станцій тощо — як раніше.
 // [S2c2a] Екран «EQ + Balance» (Mode::Menu + MenuContext::EqBalance) теж виводиться на ВСЮ панель 320×240
 // (DisplayManager::setFullPanel(true)): шапка-смуга з назвою входу, показник вибраної смуги (частота й значення в дБ),
-// вищі стовпчики; розкладка й кольори — config/eq_screen_config.h (палітра з main_layout). Спливне вікно (Гучність /
-// Баланс) центроване на панелі 320×240, розкладка — screens_cfg::popup_layout. Поведінку (вибір, діапазон, таймаути) не змінено.
+// вищі стовпчики; розкладка й кольори — config/eq_screen_config.h (палітра з main_layout). Поведінку (вибір, діапазон,
+// таймаути) не змінено.
+// [S2c2b] «Список станцій» (Mode::Menu + MenuContext::StationList) теж на ВСЮ панель 320×240: шапка-смуга «Станції»,
+// 8 рядків, виділений рядок, позначка станції, що грає; розкладка — config/station_list_config.h.
 
 namespace {
 
@@ -84,7 +86,7 @@ using D = DisplayManager;
 namespace c = screens_cfg;
 namespace dc = display_cfg;
 namespace ml = screens_cfg::main_layout;
-namespace pl = screens_cfg::popup_layout;   // [S2c2a] спливне вікно 320×240
+namespace slc = station_list_cfg;           // [S2c2b] список станцій 320×240
 
 static_assert(std::is_trivially_copyable<AppStateData>::value,
               "AppStateData має бути POD для memcmp");
@@ -159,12 +161,6 @@ int      s_wifiBarsDrawn = -1;   // s_wifiBars, врахований у оста
 // [Prompt 36] Кількість «рисок» іконки Wi-Fi (0 = не підключено), стан гістерезису лише в UI.
 uint8_t s_wifiBars = 0;
 constexpr uint8_t kWifiBarsFull = 3;
-
-// [Prompt 32] Спливне вікно: останній побачений popupSeq і час закінчення показу.
-bool     s_popupSeqKnown = false;
-uint8_t  s_popupSeqSeen  = 0;
-bool     s_popupActive   = false;
-uint32_t s_popupUntilMs  = 0;
 
 AppStateData s_prev;            // попередній знімок
 bool         s_havePrev = false;
@@ -725,39 +721,6 @@ void drawWeatherBlock() {
     }
 }
 
-// [Prompt 32] Спливне вікно параметра звуку: підпис (Large) + значення великими цифрами.
-// Знак +/- лише для параметрів зі знаком (тембр, баланс), і лише коли значення не нуль
-// (як було в статус-рядку). Гучність — без знака.
-// [P48b-фікс] Баланс береться з AppStateData::balanceDb (дБ, −20..+20, баланс активного входу),
-// [P50b] AdjustTarget має лише Volume і Balance; legacy-цілі тембру / gain видалено.
-// [S2c2a] Геометрія, кольори й підписи — screens_cfg::popup_layout (центр панелі 320×240; вікно малюється лише поверх
-// основного екрана, що виводиться на всю панель). Підписи українською, значення — Digits.
-void drawPopup(const AppStateData& s) {
-    const char* label = "";
-    int value = 0;
-    bool signedValue = false;
-    switch (s.popupTarget) {
-        case AdjustTarget::Volume:  label = pl::kLabelVolume;  value = s.volume;    break;
-        case AdjustTarget::Balance: label = pl::kLabelBalance; value = s.balanceDb; signedValue = true; break;   // [P48b-фікс]
-    }
-    char buf[8];
-    if (signedValue && value != 0) snprintf(buf, sizeof(buf), "%+d", value);
-    else                           snprintf(buf, sizeof(buf), "%d", value);
-
-    D::fillRect(pl::kX, pl::kY, pl::kW, pl::kH, pl::kColorBorder);
-    D::fillRect(static_cast<int16_t>(pl::kX + pl::kBorder),
-                static_cast<int16_t>(pl::kY + pl::kBorder),
-                static_cast<int16_t>(pl::kW - 2 * pl::kBorder),
-                static_cast<int16_t>(pl::kH - 2 * pl::kBorder), pl::kColorBg);
-
-    const int32_t lw = UiFonts::textWidth(label, FontSize::Large);
-    D::drawText(label, static_cast<int16_t>(pl::kX + (pl::kW - lw) / 2), pl::kLabelY,
-                FontSize::Large, pl::kColorLabel);
-    const int32_t dw = UiFonts::textWidth(buf, FontSize::Digits);
-    D::drawText(buf, static_cast<int16_t>(pl::kX + (pl::kW - dw) / 2), pl::kDigitsY,
-                FontSize::Digits, pl::kColorDigits);
-}
-
 // [Prompt 10] Текст і колір статусу потоку за StreamStatus.
 // [Prompt 33] Раніше drawStreamStatus() малювала це окремим рядком (y=122); тепер це лише
 // вибір тексту й кольору (тексти БЕЗ змін), а малює обʼєднаний рядок drawRadio().
@@ -860,30 +823,42 @@ void drawMain(const AppStateData& s, int vuLitL, int vuLitR, int peakL, int peak
     if (s.mute) D::drawIcon(IconId::Mute, ml::kVolMuteIconX, ml::kVolMuteIconY, c::kColorAccent);
 }
 
+// [S2c2b] Список станцій на ВСЮ панель 320×240 (DisplayManager::setFullPanel(true), див. frame()): шапка-смуга
+// «Станції» (стиль екрана EQ + Balance), 8 рядків, виділений рядок кольором, позначка станції, що грає зараз
+// (смужка ліворуч; лише коли активне радіо). Прокрутка — як раніше: вибраний рядок «прилипає» до нижнього,
+// коли індекс вибору виходить за kRows. Довга назва обрізається fitText() з "...". Усі числа — station_list_cfg.
 void drawStationList(const AppStateData& s) {
-    D::drawText("Stations", c::kMargin, c::kListTitleY, FontSize::Small, c::kColorDim);
-    D::drawLine(0, c::kListLineY, c::kW - 1, c::kListLineY, c::kColorDim);
+    D::fillRect(0, 0, slc::kPanelW, slc::kHeaderH, slc::kColorHeaderBg);
+    D::drawText(slc::kTitleText, slc::kHeaderPadX, slc::kHeaderTitleY, FontSize::Small, slc::kColorHeaderTitle);
+    D::drawLine(0, slc::kHeaderLineY, static_cast<int16_t>(slc::kPanelW - 1), slc::kHeaderLineY,
+                slc::kColorHeaderLine);
 
     // [Prompt 11] Реальні назви зі StationStore.
     const size_t count = StationStore::count();
     if (count == 0) {
-        drawCentered("No stations", c::kPlaceholderY, FontSize::Large, c::kColorDim);
+        drawCentered(slc::kNoStationsText, slc::kEmptyY, FontSize::Large, slc::kColorEmpty);
         return;
     }
 
-    const int32_t maxW = c::kW - c::kListTextX - c::kMargin;
+    const int32_t maxW = slc::kPanelW - slc::kTextX - slc::kTextRightPad;
     const uint16_t sel = s.menuSelection;
-    const uint16_t first = (sel >= c::kListRows) ? static_cast<uint16_t>(sel - c::kListRows + 1) : 0;
+    const uint16_t first = (sel >= slc::kRows) ? static_cast<uint16_t>(sel - slc::kRows + 1) : 0;
+    const bool radioActive = (s.inputIndex == slc::kRadioInputIndex);
     Station st;
     char text[sizeof(Station::name) + 8];
-    for (uint8_t i = 0; i < c::kListRows; ++i) {
+    for (uint8_t i = 0; i < slc::kRows; ++i) {
         const uint32_t idx = static_cast<uint32_t>(first) + i;
-        const int16_t y = static_cast<int16_t>(c::kListFirstY + i * c::kListRowH);
-        if (idx == sel) D::fillRect(0, y, c::kW, c::kListRowH, c::kColorSelectionBg);
+        const int16_t y = static_cast<int16_t>(slc::kRowsTop + i * slc::kRowH);
+        const bool isSel = (idx == sel);
+        if (isSel) D::fillRect(0, y, slc::kPanelW, slc::kRowH, slc::kColorSelectionBg);
         if (idx >= count || !StationStore::get(idx, st)) continue;  // порожній рядок
+        if (radioActive && idx == s.stationIndex) {
+            D::fillRect(slc::kMarkX, static_cast<int16_t>(y + slc::kMarkDy), slc::kMarkW, slc::kMarkH,
+                        slc::kColorMark);
+        }
         fitText(st.name, text, sizeof(text), FontSize::Small, maxW);
-        D::drawText(text, c::kListTextX, static_cast<int16_t>(y + c::kListTextDy), FontSize::Small,
-                    dc::kColorFg);
+        D::drawText(text, slc::kTextX, static_cast<int16_t>(y + slc::kTextDy), FontSize::Small,
+                    isSel ? slc::kColorTextSel : slc::kColorText);
     }
 }
 
@@ -1145,6 +1120,8 @@ bool frame() {
     const bool mainScreen = !s.restarting && (s.mode == Mode::Radio || s.mode == Mode::ExternalInput);
     // [S2c2a] Екран EQ + Balance теж виводиться на всю панель 320×240 (решта меню лишається у 170 рядках до S2c2b).
     const bool eqScreen = !s.restarting && s.mode == Mode::Menu && s.menuContext == MenuContext::EqBalance;
+    // [S2c2b] Список станцій теж на всю панель 320×240 (решта меню / екранів лишається у 170 рядках до S2c2c).
+    const bool stationListScreen = !s.restarting && s.mode == Mode::Menu && s.menuContext == MenuContext::StationList;
 
     // full — потрібен повний вивід кадру (змінилось щось поза VU / marquee); інакше лише рядки [rowMin, rowMax).
     bool full = !s_havePrev || memcmp(&s, &s_prev, sizeof(s)) != 0;
@@ -1223,29 +1200,6 @@ bool frame() {
         if (mainScreen) markRows(ml::kVuLY, ml::kVuBandH);
     }
 
-    // [Prompt 32] Спливне вікно: нова подія (popupSeq змінився) запускає/продовжує показ;
-    // поза Radio/ExternalInput (і під час перезапуску) вікно ховається й не повертається саме.
-    const bool popupMode = mainScreen;
-    if (!s_popupSeqKnown) {
-        s_popupSeqKnown = true;                 // перший кадр: не вважати старе значення подією
-        s_popupSeqSeen  = s.popupSeq;
-    } else if (s.popupSeq != s_popupSeqSeen) {
-        s_popupSeqSeen = s.popupSeq;
-        if (popupMode && !s.popupDismissed) {   // [Prompt 49d] «сховати» (рівень) сильніше за подію «показати» в тому ж кадрі
-            s_popupActive  = true;
-            s_popupUntilMs = now + c::kPopupTimeoutMs;
-        }
-    }
-    if (!popupMode) {
-        s_popupActive = false;
-    } else if (s_popupActive && s.popupDismissed) {
-        s_popupActive = false;                  // [Prompt 49d] кнопка / клік енкодера / IR — сховати одразу
-        full = true;                            // перемалювати кадр без вікна
-    } else if (s_popupActive && static_cast<int32_t>(now - s_popupUntilMs) >= 0) {
-        s_popupActive = false;
-        full = true;                            // перемалювати кадр без вікна
-    }
-
     if (mainScreen && s.mode == Mode::Radio) {
         // [Prompt 35] Назва станції — XLarge; [S2c1] marquee лише позначає свої рядки (часткова передача).
         if (marqueeUpdate(s_station, s.stationName[0] ? s.stationName : "No station", FontSize::XLarge, now)) {
@@ -1268,7 +1222,7 @@ bool frame() {
 
     if (!full && rowMax < 0) return false;   // панель лишається як була
 
-    D::setFullPanel(mainScreen || eqScreen);   // [S2c1] 240 рядків для основного екрана, [S2c2a] і для EQ + Balance; 170 для решти
+    D::setFullPanel(mainScreen || eqScreen || stationListScreen);   // [S2c1] 240 рядків для основного екрана, [S2c2a] EQ + Balance, [S2c2b] список станцій; 170 для решти
     D::fillScreen(dc::kColorBg);
     if (s.restarting) {  // [Prompt 28] «тихий» перезапуск: один рядок замість будь-якого екрана
         drawPlaceholder("Restarting...");  // три крапки ASCII: U+2026 немає у шрифті
@@ -1288,7 +1242,6 @@ bool frame() {
         case Mode::OtaUpdate:     drawOtaUpdate(s);              break;   // [Prompt 16]
         default:                  drawPlaceholder("?");          break;
     }
-    if (s_popupActive) drawPopup(s);   // [Prompt 32] останній шар кадру
     // [S2c1] Змінились лише VU / marquee: передати тільки їхні рядки (буфер перемальовано повністю).
     if (mainScreen && ml::kPartialPush && !full && rowMax > rowMin) {
         D::setPushBand(static_cast<int16_t>(rowMin), static_cast<int16_t>(rowMax - rowMin));
@@ -1318,8 +1271,6 @@ bool UiScreens::begin() {
     s_clockPolled   = false;
     s_weatherPolled = false;
     s_wifiBarsDrawn = -1;
-    s_popupSeqKnown = false;   // [Prompt 32]
-    s_popupActive   = false;
     DisplayManager::setFrameCallback(&frame);
     return true;
 }
