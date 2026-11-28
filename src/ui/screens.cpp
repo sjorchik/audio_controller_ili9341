@@ -19,6 +19,11 @@
 #include "ui/fonts.h"
 #include "stations/station_store.h"  // [Prompt 11] ДОДАНО: чисті дані, не залізо
 #include "ui/icons.h"
+#include <math.h>
+#include "config/ua_text_config.h"   // [S2c1] українські тексти основного екрана
+#include "core/time_service.h"       // [S2c1] лише читання (getLocal)
+#include "core/weather_codes.h"      // [S2c1]
+#include "core/weather_service.h"    // [S2c1] лише читання (getStatus)
 
 #if DISPLAY_DEMO
 #warning "DISPLAY_DEMO = 1: постав 0 у config/display_config.h, щоб показувати реальні екрани"
@@ -60,11 +65,21 @@
 // [Prompt 17] ВИНЯТОК З ІЗОЛЯЦІЇ: рівні VU беруться напряму з VuSourceDecodedPcm::read() (з
 // частотою кадру), МИНАЮЧИ AppState; AppStateData.vuLeft/vuRight не використовуються.
 
+// [S2c1] Основний екран (Mode::Radio / Mode::ExternalInput, включно з Computer / Aux / Player) малюється на
+// ВСЮ панель 320×240 (screens_cfg::main_layout): смуга стану, годинник і дата (TimeService::getLocal),
+// погода (WeatherService::getStatus, раз на секунду, без мережі), тег джерела, назва станції / входу,
+// рядок треку, VU L / R і число гучності. Старі drawRadio / drawExternal / верхня смуга іконок / «Маяк-233»
+// прибрано. Решта екранів лишається у верхніх 320×170 (DisplayManager::setFullPanel(false)).
+// Часткова передача: якщо змінились лише VU і / або рядки marquee, на панель іде лише смуга з цими
+// рядками (DisplayManager::setPushBand), інакше весь кадр. Мова написів основного екрана — українська
+// (рішення власника 2026-11-27); «Restarting...», EQ, список станцій тощо — як раніше.
+
 namespace {
 
 using D = DisplayManager;
 namespace c = screens_cfg;
 namespace dc = display_cfg;
+namespace ml = screens_cfg::main_layout;
 
 static_assert(std::is_trivially_copyable<AppStateData>::value,
               "AppStateData має бути POD для memcmp");
@@ -108,11 +123,33 @@ struct VuPeak {
 VuPeak s_peakL = {};
 VuPeak s_peakR = {};
 
-struct VuMark {
-    char    text[8];
-    int16_t x;              // лівий край тексту
+// [S2c1] Знімки даних основного екрана (лише UI). Порівнюються memcmp, тож структури обнуляються (memset)
+// перед заповненням; зміна знімка = потрібен повний вивід кадру.
+struct ClockView {
+    bool valid;
+    char time[8];    // "HH:MM" або "--:--"
+    char date[40];   // "пт, 27 листопада" або «Час невідомий»
 };
-VuMark s_vuMarks[c::kVuScaleMarkCount] = {};
+struct WeatherView {
+    bool    set;     // місто задано
+    bool    valid;   // є дані для цього міста
+    bool    stale;   // дані старші за ml::kWeatherStaleMs
+    bool    isDay;
+    int16_t temp;    // °C, округлено
+    int16_t windDm;  // вітер, дм/с (м/с * 10)
+    uint8_t humidity;   // %
+    uint16_t pressureHpa;   // гПа; 0 = немає даних (сервіс ще не віддає)
+    int16_t  windDirDeg;    // напрямок «звідки», 0..359; -1 = немає даних (сервіс ще не віддає)
+    uint8_t cond;    // weather::Condition
+    char    city[weather_cfg::kNameBytes];
+};
+ClockView   s_clock = {};
+WeatherView s_wx    = {};
+bool     s_clockPolled   = false;
+bool     s_weatherPolled = false;
+uint32_t s_clockNextMs   = 0;
+uint32_t s_weatherNextMs = 0;
+int      s_wifiBarsDrawn = -1;   // s_wifiBars, врахований у останньому кадрі
 
 // [Prompt 36] Кількість «рисок» іконки Wi-Fi (0 = не підключено), стан гістерезису лише в UI.
 uint8_t s_wifiBars = 0;
@@ -251,68 +288,78 @@ void wifiBarsUpdate(const AppStateData& s) {
     }
 }
 
-// [Prompt 36] SSID і IP у смузі іконок Radio. Офлайн / AP — порожньо; немає звʼязку — "Connecting...".
-constexpr size_t kNetFitCap = sizeof(AppStateData::wifiSsid) + 8;   // запас під "..." для fitText
-
-void drawNetInfo(const AppStateData& s) {
-    if (s.offline || s.wifiApMode) return;
-    char line[kNetFitCap];
-    if (!s.wifiConnected) {
-        D::drawText("Connecting...", c::kNetX, c::kNetY, FontSize::Tiny, c::kColorNet);
-        return;
-    }
-    // Один рядок "SSID  IP": IP цілий, SSID обрізається під залишок ширини.
-    int32_t ssidMaxW = c::kNetW;
-    int32_t ipW = 0;
-    if (s.wifiIp[0] != '\0') {
-        ipW = UiFonts::textWidth(s.wifiIp, FontSize::Tiny);
-        ssidMaxW = c::kNetW - ipW - (s.wifiSsid[0] != '\0' ? c::kNetTextGap : 0);
-    }
-    int32_t x = c::kNetX;
-    if (s.wifiSsid[0] != '\0' && ssidMaxW > 0) {
-        fitText(s.wifiSsid, line, sizeof(line), FontSize::Tiny, ssidMaxW);
-        D::drawText(line, static_cast<int16_t>(x), c::kNetY, FontSize::Tiny, c::kColorNet);
-        x += UiFonts::textWidth(line, FontSize::Tiny) + c::kNetTextGap;
-    }
-    if (ipW > 0) {
-        D::drawText(s.wifiIp, static_cast<int16_t>(x), c::kNetY, FontSize::Tiny, c::kColorNet);
-    }
+// [S2c1] Чи настав час чергового опитування (самосинхронізація: після довгої перерви — одразу).
+bool pollDue(bool& polled, uint32_t& nextMs, uint32_t periodMs, uint32_t now) {
+    if (polled && static_cast<int32_t>(now - nextMs) < 0) return false;
+    polled = true;
+    nextMs = now + periodMs;
+    return true;
 }
 
-void drawTopIcons(const AppStateData& s, bool showWifi) {
-    int16_t muteX = c::kMuteIconX;
-    if (s.offline) {
-        // [Prompt 28] Офлайн: у слоті Wi-Fi-індикатора — текст "offline" (нової іконки немає);
-        // іконка мʼюту зсувається ліворуч від нього. Показуємо і там, де Wi-Fi-іконки не було
-        // (ExternalInput), бо в офлайні це єдиний екран зі верхньою панеллю.
-        constexpr const char* kOfflineText = "offline";
-        const int32_t w = UiFonts::textWidth(kOfflineText, FontSize::Tiny);
-        const int16_t x = static_cast<int16_t>(c::kW - c::kMargin - w);
-        const int16_t h = static_cast<int16_t>(UiFonts::lineHeight(FontSize::Tiny));
-        const int16_t y = static_cast<int16_t>(c::kTopBarY + (dc::kIconSize - h) / 2);
-        D::drawText(kOfflineText, x, y, FontSize::Tiny, c::kColorAccent);
-        muteX = static_cast<int16_t>(x - c::kOfflineMuteGap - dc::kIconSize);
-    } else if (showWifi) {
-        // [Prompt 36] Підключено: Wifi1..3 за RSSI (s_wifiBars >= 1); немає звʼязку: червона WifiOff.
-        const IconId icon = s.wifiConnected
-                                ? UiIcons::wifiForBars(s_wifiBars ? s_wifiBars : kWifiBarsFull)
-                                : IconId::WifiOff;
-        D::drawIcon(icon, c::kWifiIconX, c::kTopBarY, s.wifiConnected ? dc::kColorFg : c::kColorBad);
+// [S2c1] Оновлює s_clock з TimeService (неблокуюче). true — знімок змінився (потрібен кадр).
+bool clockUpdate(uint32_t now) {
+    if (!pollDue(s_clockPolled, s_clockNextMs, ml::kClockPollMs, now)) return false;
+    ClockView v;
+    memset(&v, 0, sizeof(v));
+    tm lt;
+    if (TimeService::getLocal(lt)) {
+        v.valid = true;
+        snprintf(v.time, sizeof(v.time), "%02u:%02u", static_cast<unsigned>(lt.tm_hour % 24),
+                 static_cast<unsigned>(lt.tm_min % 60));
+        const int wd = (lt.tm_wday >= 0 && lt.tm_wday < 7) ? lt.tm_wday : 0;
+        const int mo = (lt.tm_mon >= 0 && lt.tm_mon < 12) ? lt.tm_mon : 0;
+        snprintf(v.date, sizeof(v.date), "%s, %d %s", ua_text::kDayShort[wd], lt.tm_mday,
+                 ua_text::kMonthGen[mo]);
+    } else {
+        strlcpy(v.time, ua_text::kClockUnknown, sizeof(v.time));
+        strlcpy(v.date, ua_text::kTimeUnknown, sizeof(v.date));
     }
-    if (s.mute) D::drawIcon(IconId::Mute, muteX, c::kTopBarY, c::kColorAccent);
+    if (memcmp(&v, &s_clock, sizeof(v)) == 0) return false;
+    s_clock = v;
+    return true;
 }
 
-// [Prompt 34] VU-метр у стилі «Маяк-233»: смуга L зверху, шкала дБ посередині, смуга R знизу.
-// Сегмент i світиться, коли i < lit; пік (peak) — окремий яскравий сегмент peak-1. Сегменти
-// малюються по одному (кожен окремим прямокутником, між ними проміжок кольору тла): групувати
-// у суцільні прямокутники не можна без додаткових ліній проміжків, а 2 × 41 малий fillRect
-// у спрайт PSRAM — копійки порівняно з передачею кадру.
-// ENABLE_VU == 0: стара порожня рамка.
+// [S2c1] Оновлює s_wx зі знімка WeatherService (м'ютекс на мікросекунди, без мережі). true — змінилось.
+bool weatherUpdate(uint32_t now) {
+    if (!pollDue(s_weatherPolled, s_weatherNextMs, ml::kWeatherPollMs, now)) return false;
+    WeatherService::Status st;
+    if (!WeatherService::getStatus(st)) return false;   // м'ютекс зайнятий: лишаємо попередній знімок
+    WeatherView v;
+    memset(&v, 0, sizeof(v));
+    v.set = st.loc.set;
+    strlcpy(v.city, st.loc.name, sizeof(v.city));
+    v.valid = st.valid;
+    if (st.valid) {
+        long t = lroundf(st.cur.tempC);
+        if (t < -99) t = -99;
+        if (t > 99) t = 99;
+        v.temp  = static_cast<int16_t>(t);
+        long wd = lroundf(st.cur.windMs * 10.0f);
+        if (wd < 0) wd = 0;
+        if (wd > 999) wd = 999;
+        v.windDm    = static_cast<int16_t>(wd);
+        v.humidity  = st.cur.humidity > 100 ? 100 : st.cur.humidity;
+        // ТИСК І НАПРЯМ ВІТРУ: WeatherService::Current їх ще не має. Коли додасте поля — підставити тут:
+        //   v.pressureHpa = <гПа>;   v.windDirDeg = <градуси 0..359>;
+        v.pressureHpa = 0;
+        v.windDirDeg  = -1;
+        v.isDay = st.cur.isDay;
+        v.cond  = static_cast<uint8_t>(weather::category(st.cur.code, st.cur.isDay));
+        v.stale = (st.ageMs != WeatherService::kNoAge) && (st.ageMs > ml::kWeatherStaleMs);
+    }
+    if (memcmp(&v, &s_wx, sizeof(v)) == 0) return false;
+    s_wx = v;
+    return true;
+}
+
+// [S2c1] VU: два рядки L / R (сегменти зелений -> бурштиновий -> червоний), число гучності праворуч.
+// Сегмент i світиться, коли i < lit; пік — окремий яскравий сегмент peak-1. Кожен сегмент — окремий
+// fillRect (між ними проміжок кольору тла). ENABLE_VU == 0: порожня рамка.
 #if ENABLE_VU
 int vuToSegments(float level) {
-    int n = static_cast<int>(level * c::kVuSegments + 0.5f);
+    int n = static_cast<int>(level * ml::kVuSegments + 0.5f);
     if (n < 0) n = 0;
-    if (n > c::kVuSegments) n = c::kVuSegments;
+    if (n > ml::kVuSegments) n = ml::kVuSegments;
     return n;
 }
 
@@ -321,14 +368,14 @@ int vuToSegments(float level) {
 void vuPeakUpdate(VuPeak& p, int lit, uint32_t now) {
     if (lit >= p.seg) {
         p.seg         = lit;
-        p.holdUntilMs = now + c::kVuPeakHoldMs;
+        p.holdUntilMs = now + ml::kVuPeakHoldMs;
         p.lastFallMs  = p.holdUntilMs;
         return;
     }
     if (static_cast<int32_t>(now - p.holdUntilMs) < 0) return;   // ще утримується
-    const uint32_t steps = (now - p.lastFallMs) / c::kVuPeakFallMs;
+    const uint32_t steps = (now - p.lastFallMs) / ml::kVuPeakFallMs;
     if (steps == 0) return;
-    p.lastFallMs += steps * c::kVuPeakFallMs;
+    p.lastFallMs += steps * ml::kVuPeakFallMs;
     p.seg = (steps >= static_cast<uint32_t>(p.seg - lit)) ? lit : p.seg - static_cast<int>(steps);
 }
 
@@ -338,50 +385,338 @@ void vuPeakReset(VuPeak& p) {
     p.lastFallMs  = 0;
 }
 
-// Мітки шкали: позиція лінійна за дБ у тій самій шкалі, що й мапінг рівня на сегменти.
-// Викликати після DisplayManager::begin() (потрібні метрики шрифту).
-void vuScaleInit() {
-    for (uint8_t i = 0; i < c::kVuScaleMarkCount; ++i) {
-        const int db = c::kVuScaleMarksDb[i];
-        snprintf(s_vuMarks[i].text, sizeof(s_vuMarks[i].text), "%d", db);
-        const float f = (static_cast<float>(db) - vu_cfg::kDbFloor) / (-vu_cfg::kDbFloor);
-        const int32_t cx = c::kVuBarX + static_cast<int32_t>(f * c::kVuUsedW + 0.5f);
-        const int32_t w  = UiFonts::textWidth(s_vuMarks[i].text, FontSize::Tiny);
-        s_vuMarks[i].x   = static_cast<int16_t>(cx - w / 2);
-    }
-}
-
 void drawVuBar(int16_t y, int lit, int peak) {
     const int peakIdx = peak - 1;   // -1, якщо піку немає
-    for (uint8_t i = 0; i < c::kVuSegments; ++i) {
-        const bool over = i >= c::kVuRedSeg;
-        const bool on   = (i < lit) || (static_cast<int>(i) == peakIdx);
+    for (uint8_t i = 0; i < ml::kVuSegments; ++i) {
+        const bool on = (i < lit) || (static_cast<int>(i) == peakIdx);
         uint16_t color;
-        if (on) color = over ? c::kColorVuOver : c::kColorVuLit;
-        else    color = over ? c::kColorVuOverOff : c::kColorVuOff;
-        const int16_t x = static_cast<int16_t>(c::kVuBarX + i * c::kVuSegPitch);
-        D::fillRect(x, y, c::kVuSegW, c::kVuBarH, color);
+        if (i >= ml::kVuRedSeg)        color = on ? ml::kColorVuRed   : ml::kColorVuRedOff;
+        else if (i >= ml::kVuAmberSeg) color = on ? ml::kColorVuAmber : ml::kColorVuAmberOff;
+        else                           color = on ? ml::kColorVuGreen : ml::kColorVuGreenOff;
+        const int16_t x = static_cast<int16_t>(ml::kVuBarX + i * ml::kVuSegPitch);
+        D::fillRect(x, y, ml::kVuSegW, ml::kVuBarH, color);
     }
 }
 #endif
 
 void drawVu(int litL, int litR, int peakL, int peakR) {
 #if ENABLE_VU
-    drawVuBar(c::kVuLY, litL, peakL);
-    drawVuBar(c::kVuRY, litR, peakR);
-    for (uint8_t i = 0; i < c::kVuScaleMarkCount; ++i) {
-        D::drawText(s_vuMarks[i].text, s_vuMarks[i].x, c::kVuScaleY, FontSize::Tiny, c::kColorVuScale);
-    }
-    const int16_t dy = static_cast<int16_t>((c::kVuBarH - dc::kFontTinyPx) / 2);
-    D::drawText("L", c::kVuLabelX, static_cast<int16_t>(c::kVuLY + dy), FontSize::Tiny, c::kColorVuScale);
-    D::drawText("R", c::kVuLabelX, static_cast<int16_t>(c::kVuRY + dy), FontSize::Tiny, c::kColorVuScale);
+    drawVuBar(ml::kVuLY, litL, peakL);
+    drawVuBar(ml::kVuRY, litR, peakR);
+    const int16_t dy = static_cast<int16_t>((ml::kVuBarH - dc::kFontTinyPx) / 2);
+    D::drawText("L", ml::kVuLabelX, static_cast<int16_t>(ml::kVuLY + dy), FontSize::Tiny, ml::kColorVuLabel);
+    D::drawText("R", ml::kVuLabelX, static_cast<int16_t>(ml::kVuRY + dy), FontSize::Tiny, ml::kColorVuLabel);
 #else
     (void)litL;
     (void)litR;
     (void)peakL;
     (void)peakR;
-    D::drawRect(c::kVuX, c::kVuY, c::kVuW, c::kVuH, c::kColorDim);
+    D::drawRect(ml::kVuBarX, ml::kVuLY, ml::kVuUsedW, ml::kVuBandH, c::kColorDim);
 #endif
+}
+
+// [S2c1] Заповнений круг рядками (DisplayManager не має кіл): 2r+1 вузьких fillRect; r <= ~12.
+void fillCircle(int16_t cx, int16_t cy, int16_t r, uint16_t color) {
+    for (int16_t dy = -r; dy <= r; ++dy) {
+        int16_t dx = 0;
+        while ((dx + 1) * (dx + 1) + dy * dy <= r * r) ++dx;
+        D::fillRect(static_cast<int16_t>(cx - dx), static_cast<int16_t>(cy + dy),
+                    static_cast<int16_t>(2 * dx + 1), 1, color);
+    }
+}
+
+// Лінія завтовшки 2 px (дві сусідні вертикалі).
+void drawLine2(int16_t x0, int16_t y0, int16_t x1, int16_t y1, uint16_t color) {
+    D::drawLine(x0, y0, x1, y1, color);
+    D::drawLine(static_cast<int16_t>(x0 + 1), y0, static_cast<int16_t>(x1 + 1), y1, color);
+}
+
+// Хмарка в рамці 32×20 (x, y — лівий верх): три круги й пласка основа.
+void drawCloud(int16_t x, int16_t y, uint16_t color) {
+    fillCircle(static_cast<int16_t>(x + 9), static_cast<int16_t>(y + 12), 7, color);
+    fillCircle(static_cast<int16_t>(x + 17), static_cast<int16_t>(y + 8), 8, color);
+    fillCircle(static_cast<int16_t>(x + 25), static_cast<int16_t>(y + 12), 6, color);
+    D::fillRect(static_cast<int16_t>(x + 9), static_cast<int16_t>(y + 12), 17, 8, color);
+}
+
+// Сонце: круг радіуса r і (за потреби) 8 променів.
+void drawSun(int16_t cx, int16_t cy, int16_t r, bool rays, uint16_t color) {
+    fillCircle(cx, cy, r, color);
+    if (!rays) return;
+    const int16_t in = static_cast<int16_t>(r + 4);
+    const int16_t out = static_cast<int16_t>(r + 8);
+    const int16_t din = static_cast<int16_t>(in * 7 / 10);
+    const int16_t dout = static_cast<int16_t>(out * 7 / 10);
+    D::drawLine(static_cast<int16_t>(cx + in), cy, static_cast<int16_t>(cx + out), cy, color);
+    D::drawLine(static_cast<int16_t>(cx - in), cy, static_cast<int16_t>(cx - out), cy, color);
+    D::drawLine(cx, static_cast<int16_t>(cy + in), cx, static_cast<int16_t>(cy + out), color);
+    D::drawLine(cx, static_cast<int16_t>(cy - in), cx, static_cast<int16_t>(cy - out), color);
+    D::drawLine(static_cast<int16_t>(cx + din), static_cast<int16_t>(cy + din),
+                static_cast<int16_t>(cx + dout), static_cast<int16_t>(cy + dout), color);
+    D::drawLine(static_cast<int16_t>(cx - din), static_cast<int16_t>(cy + din),
+                static_cast<int16_t>(cx - dout), static_cast<int16_t>(cy + dout), color);
+    D::drawLine(static_cast<int16_t>(cx + din), static_cast<int16_t>(cy - din),
+                static_cast<int16_t>(cx + dout), static_cast<int16_t>(cy - dout), color);
+    D::drawLine(static_cast<int16_t>(cx - din), static_cast<int16_t>(cy - din),
+                static_cast<int16_t>(cx - dout), static_cast<int16_t>(cy - dout), color);
+}
+
+// Місяць: круг і зміщений круг кольору тла (серп відкритий угору-вправо).
+void drawMoon(int16_t cx, int16_t cy, int16_t r, uint16_t color) {
+    fillCircle(cx, cy, r, color);
+    fillCircle(static_cast<int16_t>(cx + r / 2 + 1), static_cast<int16_t>(cy - r / 3), static_cast<int16_t>(r - 1),
+               ml::kColorBg);
+}
+
+// [S2c1] Іконка погоди 36×36 з примітивів (x, y — лівий верх). stale — усе приглушеним кольором.
+// isDay впливає на Clear / PartlyCloudy (сонце / місяць).
+void drawWeatherIcon(weather::Condition cond, bool isDay, bool stale, int16_t x, int16_t y) {
+    const uint16_t sun   = stale ? ml::kColorWxStale : ml::kColorSun;
+    const uint16_t moon  = stale ? ml::kColorWxStale : ml::kColorMoon;
+    const uint16_t cl    = stale ? ml::kColorWxStale : ml::kColorCloudLight;
+    const uint16_t cd    = stale ? ml::kColorWxStale : ml::kColorCloudDark;
+    const uint16_t rain  = stale ? ml::kColorWxStale : ml::kColorRain;
+    const uint16_t snow  = stale ? ml::kColorWxStale : ml::kColorSnow;
+    const uint16_t bolt  = stale ? ml::kColorWxStale : ml::kColorBolt;
+    const uint16_t fog   = stale ? ml::kColorWxStale : ml::kColorFog;
+    switch (cond) {
+        case weather::Condition::Clear:
+            if (isDay) drawSun(static_cast<int16_t>(x + 18), static_cast<int16_t>(y + 18), 8, true, sun);
+            else       drawMoon(static_cast<int16_t>(x + 18), static_cast<int16_t>(y + 18), 11, moon);
+            break;
+        case weather::Condition::PartlyCloudy:
+            if (isDay) drawSun(static_cast<int16_t>(x + 13), static_cast<int16_t>(y + 12), 6, true, sun);
+            else       drawMoon(static_cast<int16_t>(x + 13), static_cast<int16_t>(y + 12), 8, moon);
+            drawCloud(static_cast<int16_t>(x + 4), static_cast<int16_t>(y + 14), cl);
+            break;
+        case weather::Condition::Cloudy:
+            drawCloud(static_cast<int16_t>(x + 4), static_cast<int16_t>(y + 4), cd);
+            drawCloud(static_cast<int16_t>(x + 1), static_cast<int16_t>(y + 14), cl);
+            break;
+        case weather::Condition::Fog:
+            drawCloud(static_cast<int16_t>(x + 2), static_cast<int16_t>(y + 2), cd);
+            for (int16_t i = 0; i < 3; ++i) {
+                D::fillRect(static_cast<int16_t>(x + 3), static_cast<int16_t>(y + 25 + i * 4), 30, 2, fog);
+            }
+            break;
+        case weather::Condition::Drizzle:
+            drawCloud(static_cast<int16_t>(x + 2), static_cast<int16_t>(y + 4), cl);
+            for (int16_t i = 0; i < 4; ++i) {
+                D::fillRect(static_cast<int16_t>(x + 7 + i * 7), static_cast<int16_t>(y + 27 + ((i & 1) ? 4 : 0)),
+                            2, 3, rain);
+            }
+            break;
+        case weather::Condition::Rain:
+            drawCloud(static_cast<int16_t>(x + 2), static_cast<int16_t>(y + 2), cl);
+            for (int16_t i = 0; i < 4; ++i) {
+                const int16_t x0 = static_cast<int16_t>(x + 9 + i * 7);
+                drawLine2(static_cast<int16_t>(x0 + 3), static_cast<int16_t>(y + 25), x0, static_cast<int16_t>(y + 34), rain);
+            }
+            break;
+        case weather::Condition::Snow:
+            drawCloud(static_cast<int16_t>(x + 2), static_cast<int16_t>(y + 2), cl);
+            for (int16_t i = 0; i < 3; ++i) {
+                const int16_t fx = static_cast<int16_t>(x + 9 + i * 9);
+                const int16_t fy = static_cast<int16_t>(y + 30);
+                D::drawLine(static_cast<int16_t>(fx - 3), fy, static_cast<int16_t>(fx + 3), fy, snow);
+                D::drawLine(fx, static_cast<int16_t>(fy - 3), fx, static_cast<int16_t>(fy + 3), snow);
+                D::drawLine(static_cast<int16_t>(fx - 2), static_cast<int16_t>(fy - 2),
+                            static_cast<int16_t>(fx + 2), static_cast<int16_t>(fy + 2), snow);
+                D::drawLine(static_cast<int16_t>(fx - 2), static_cast<int16_t>(fy + 2),
+                            static_cast<int16_t>(fx + 2), static_cast<int16_t>(fy - 2), snow);
+            }
+            break;
+        case weather::Condition::Thunder:
+            drawCloud(static_cast<int16_t>(x + 2), static_cast<int16_t>(y + 2), cd);
+            drawLine2(static_cast<int16_t>(x + 20), static_cast<int16_t>(y + 21), static_cast<int16_t>(x + 14),
+                      static_cast<int16_t>(y + 29), bolt);
+            drawLine2(static_cast<int16_t>(x + 14), static_cast<int16_t>(y + 29), static_cast<int16_t>(x + 19),
+                      static_cast<int16_t>(y + 29), bolt);
+            drawLine2(static_cast<int16_t>(x + 19), static_cast<int16_t>(y + 29), static_cast<int16_t>(x + 15),
+                      static_cast<int16_t>(y + 35), bolt);
+            break;
+        case weather::Condition::Unknown:
+        default: {
+            const int32_t w = UiFonts::textWidth("?", FontSize::Large);
+            D::drawText("?", static_cast<int16_t>(x + (ml::kWeatherIconSize - w) / 2),
+                        static_cast<int16_t>(y + (ml::kWeatherIconSize - dc::kFontLargePx) / 2), FontSize::Large,
+                        ml::kColorWxState);
+            break;
+        }
+    }
+}
+
+// [S2c1] Стрілка напрямку вітру з ліній (дрібна). deg — метеорологічний напрямок «ЗВІДКИ» (0 = північний,
+// за годинниковою); стрілка показує, КУДИ дме (deg + 180). deg < 0 (даних немає) — маленька крапка.
+void drawWindArrow(int16_t cx, int16_t cy, int16_t r, int16_t deg, uint16_t color) {
+    if (deg < 0) {
+        fillCircle(cx, cy, 1, color);
+        return;
+    }
+    const float a  = (static_cast<float>(deg) + 180.0f) * 0.01745329f;
+    const float dx = sinf(a);     // одиничний вектор «куди» в координатах екрана (y вниз)
+    const float dy = -cosf(a);
+    const auto px = [&](float k) { return static_cast<int16_t>(cx + lroundf(dx * k)); };
+    const auto py = [&](float k) { return static_cast<int16_t>(cy + lroundf(dy * k)); };
+    const int16_t tx = px(r);
+    const int16_t ty = py(r);
+    D::drawLine(px(-r), py(-r), tx, ty, color);
+    // Два «крила» наконечника: назад від вістря, повернуті на ±35°.
+    const float cs = 0.819f;
+    const float sn = 0.574f;
+    const float bx = -dx;
+    const float by = -dy;
+    const float wl = static_cast<float>(r) * 0.7f;
+    D::drawLine(tx, ty, static_cast<int16_t>(tx + lroundf((bx * cs - by * sn) * wl)),
+                static_cast<int16_t>(ty + lroundf((bx * sn + by * cs) * wl)), color);
+    D::drawLine(tx, ty, static_cast<int16_t>(tx + lroundf((bx * cs + by * sn) * wl)),
+                static_cast<int16_t>(ty + lroundf((-bx * sn + by * cs) * wl)), color);
+}
+
+// [S2c1] Смуга стану: іконка Wi-Fi за RSSI (s_wifiBars) і SSID ліворуч, IP праворуч. Офлайн — «offline»;
+// немає звʼязку — червона WifiOff і «Connecting...»; AP на основному екрані без тексту (екран AP — WifiSetup).
+// Іконка мʼюту тут НЕ малюється (вона в зоні гучності).
+constexpr size_t kStatusFitCap = sizeof(AppStateData::wifiSsid) + 8;   // запас під "..." для fitText
+
+void drawStatusBar(const AppStateData& s) {
+    D::fillRect(0, 0, ml::kPanelW, ml::kStatusH, ml::kColorStatusBg);
+    if (s.offline) {
+        D::drawText("offline", static_cast<int16_t>(ml::kStatusIconX + 2), ml::kStatusTextY, FontSize::Tiny,
+                    c::kColorAccent);
+        return;
+    }
+    const IconId icon = s.wifiConnected
+                            ? UiIcons::wifiForBars(s_wifiBars ? s_wifiBars : kWifiBarsFull)
+                            : IconId::WifiOff;
+    D::drawIcon(icon, ml::kStatusIconX, ml::kStatusIconY, s.wifiConnected ? dc::kColorFg : c::kColorBad);
+    if (s.wifiApMode) return;
+    if (!s.wifiConnected) {
+        D::drawText("Connecting...", ml::kStatusTextX, ml::kStatusTextY, FontSize::Tiny, ml::kColorStatusText);
+        return;
+    }
+    int32_t ipW = 0;
+    if (s.wifiIp[0] != '\0') {
+        ipW = UiFonts::textWidth(s.wifiIp, FontSize::Tiny);
+        D::drawText(s.wifiIp, static_cast<int16_t>(ml::kRightX - ipW), ml::kStatusTextY, FontSize::Tiny,
+                    ml::kColorStatusText);
+    }
+    const int32_t ssidMaxW = ml::kRightX - ml::kStatusTextX - (ipW > 0 ? ipW + ml::kStatusGap : 0);
+    if (s.wifiSsid[0] != '\0' && ssidMaxW > 0) {
+        char line[kStatusFitCap];
+        fitText(s.wifiSsid, line, sizeof(line), FontSize::Tiny, ssidMaxW);
+        D::drawText(line, ml::kStatusTextX, ml::kStatusTextY, FontSize::Tiny, ml::kColorStatusText);
+    }
+}
+
+// [S2c1] Годинник (FontSize::Clock, за ВЕРХОМ цифр) і дата під ним. Час недійсний — «--:--» і «Час невідомий».
+void drawClockBlock() {
+    const bool ok = s_clock.valid;
+    // Цифри й дата центруються по осі блоку годинника (ml::kClockCenterX).
+    const int32_t tw = UiFonts::textWidth(s_clock.time, FontSize::Clock);
+    D::drawText(s_clock.time, static_cast<int16_t>(ml::kClockCenterX - tw / 2), ml::kClockFontY, FontSize::Clock,
+                ok ? ml::kColorClock : ml::kColorClockDim);
+    char date[sizeof(ClockView::date) + 8];
+    fitText(s_clock.date, date, sizeof(date), FontSize::Small, ml::kClockBlockW);
+    const int32_t dw = UiFonts::textWidth(date, FontSize::Small);
+    D::drawText(date, static_cast<int16_t>(ml::kClockCenterX - dw / 2), ml::kDateY, FontSize::Small,
+                ok ? ml::kColorDate : ml::kColorAmber);
+}
+
+// [S2c1] Погода: іконка за weather::category, температура (XLarge, праворуч), місто (Small), стан (Tiny).
+// Немає міста — «--°» і «Місто не задано»; місто є, даних нема — «--°», назва міста й «Немає даних»;
+// дані застаріли — усе приглушеним кольором. Мінус — ASCII '-' (U+2212 у шрифті немає).
+constexpr size_t kWxFitCap = 64;
+
+void drawWeatherBlock() {
+    const WeatherView& w = s_wx;
+    const bool show = w.set && w.valid;
+    const bool dim  = !show || w.stale;
+    const uint16_t cCity  = dim ? ml::kColorWxStale : ml::kColorWxCity;
+    const uint16_t cExtra = dim ? ml::kColorWxStale : ml::kColorWxState;
+    char line[kWxFitCap];
+
+    // Верх блоку: місто (або «Місто не задано»).
+    if (!w.set) {
+        fitText(ua_text::kCityNotSet, line, sizeof(line), FontSize::Small, ml::kWeatherW);
+        D::drawText(line, ml::kWeatherX, ml::kCityY, FontSize::Small, ml::kColorWxStale);
+    } else {
+        fitText(w.city, line, sizeof(line), FontSize::Small, ml::kWeatherW);
+        D::drawText(line, ml::kWeatherX, ml::kCityY, FontSize::Small, cCity);
+    }
+
+    // Температура (XLarge) праворуч у рядку іконки.
+    char temp[16];
+    if (show) snprintf(temp, sizeof(temp), "%d%s", static_cast<int>(w.temp), ua_text::kDegree);
+    else      snprintf(temp, sizeof(temp), "%s%s", ua_text::kTempUnknown, ua_text::kDegree);
+    const int32_t tw = UiFonts::textWidth(temp, FontSize::XLarge);
+    const int32_t tempX = ml::kRightX - tw;
+    D::drawText(temp, static_cast<int16_t>(tempX), ml::kTempY, FontSize::XLarge,
+                dim ? ml::kColorWxStale : ml::kColorTemp);
+
+    const int16_t textX = static_cast<int16_t>(ml::kWeatherX + ml::kWeatherIconSize + 4);
+    int32_t regionW = tempX - 4 - textX;   // ширина між іконкою й температурою
+    if (regionW < 20) regionW = 20;
+    const int16_t rowTop = ml::kWeatherIconY;
+
+    if (!show) {
+        // Місто задано, даних немає: підпис у зоні стану (іконки немає).
+        if (w.set) {
+            fitText(ua_text::kNoWeatherData, line, sizeof(line), FontSize::Tiny, tempX - 4 - ml::kWeatherX);
+            D::drawText(line, ml::kWeatherX, static_cast<int16_t>(rowTop + (ml::kWeatherIconSize - dc::kFontTinyPx) / 2),
+                        FontSize::Tiny, ml::kColorWxStale);
+        }
+        return;
+    }
+
+    drawWeatherIcon(static_cast<weather::Condition>(w.cond), w.isDay, w.stale, ml::kWeatherX, rowTop);
+
+    // Стан праворуч від іконки: один рядок, а якщо не вміщається — у два (поділ за першим пробілом).
+    const char* state = (w.cond < ua_text::kConditionCount) ? ua_text::kCondition[w.cond]
+                                                            : ua_text::kCondition[ua_text::kConditionCount - 1];
+    const char* sp = strchr(state, ' ');
+    if (UiFonts::textWidth(state, FontSize::Tiny) <= regionW || sp == nullptr) {
+        fitText(state, line, sizeof(line), FontSize::Tiny, regionW);
+        D::drawText(line, textX, static_cast<int16_t>(rowTop + (ml::kWeatherIconSize - dc::kFontTinyPx) / 2),
+                    FontSize::Tiny, cExtra);
+    } else {
+        char part[kWxFitCap];
+        size_t n = static_cast<size_t>(sp - state);
+        if (n >= sizeof(part)) n = sizeof(part) - 1;
+        memcpy(part, state, n);
+        part[n] = '\0';
+        const int16_t y1 = static_cast<int16_t>(rowTop + (ml::kWeatherIconSize - 2 * dc::kFontTinyPx) / 2);
+        fitText(part, line, sizeof(line), FontSize::Tiny, regionW);
+        D::drawText(line, textX, y1, FontSize::Tiny, cExtra);
+        fitText(sp + 1, line, sizeof(line), FontSize::Tiny, regionW);
+        D::drawText(line, textX, static_cast<int16_t>(y1 + dc::kFontTinyPx), FontSize::Tiny, cExtra);
+    }
+
+    // Нижній рядок (Tiny): ліворуч вітер (стрілка напрямку + швидкість), праворуч тиск, між ними вологість.
+    char wind[16];
+    snprintf(wind, sizeof(wind), "%d,%d %s", w.windDm / 10, w.windDm % 10, ua_text::kUnitWind);   // десяткова кома
+    const int32_t sw = UiFonts::textWidth(wind, FontSize::Tiny);
+    drawWindArrow(static_cast<int16_t>(ml::kWeatherX + ml::kWindArrowW / 2),
+                  static_cast<int16_t>(ml::kStateY + dc::kFontTinyPx / 2), ml::kWindArrowR, w.windDirDeg, cExtra);
+    const int16_t windTextX = static_cast<int16_t>(ml::kWeatherX + ml::kWindArrowW + 3);
+    D::drawText(wind, windTextX, ml::kStateY, FontSize::Tiny, cExtra);
+    const int32_t windEnd = windTextX + sw;
+
+    char pres[16];
+    if (w.pressureHpa > 0) snprintf(pres, sizeof(pres), "%u %s", static_cast<unsigned>(w.pressureHpa), ua_text::kUnitPressure);
+    else                   snprintf(pres, sizeof(pres), "%s %s", ua_text::kPressureUnknown, ua_text::kUnitPressure);
+    const int32_t pw = UiFonts::textWidth(pres, FontSize::Tiny);
+    const int32_t presX = ml::kRightX - pw;
+    D::drawText(pres, static_cast<int16_t>(presX), ml::kStateY, FontSize::Tiny,
+                (w.pressureHpa > 0) ? cExtra : ml::kColorWxStale);
+
+    char hum[8];
+    snprintf(hum, sizeof(hum), "%u%%", static_cast<unsigned>(w.humidity));
+    const int32_t hw = UiFonts::textWidth(hum, FontSize::Tiny);
+    const int32_t gapL = windEnd + 4;
+    const int32_t gapR = presX - 4;
+    if (gapR - gapL >= hw) {   // не вміщається — не малюємо, щоб не наїжджати на сусідів
+        D::drawText(hum, static_cast<int16_t>(gapL + (gapR - gapL - hw) / 2), ml::kStateY, FontSize::Tiny, cExtra);
+    }
 }
 
 // [Prompt 32] Спливне вікно параметра звуку: підпис (Large) + значення великими цифрами.
@@ -465,36 +800,56 @@ void drawStandby() {
     drawCentered("Standby", c::kStandbyCaptionY, FontSize::Tiny, c::kColorDim);
 }
 
-void drawRadio(const AppStateData& s, int vuLitL, int vuLitR, int peakL, int peakR) {
-    // [Prompt 33] Назву входу прибрано; лишились лише іконки верхньої панелі.
-    drawTopIcons(s, true);
-    drawNetInfo(s);   // [Prompt 36]
+// [S2c1] Основний екран 320×240 (Radio / ExternalInput; Player — заглушка). Порядок шарів: смуга стану,
+// годинник | погода, розділювач, тег джерела, назва, рядок треку / «Немає зв'язку», VU, гучність (+ мʼют).
+void drawMain(const AppStateData& s, int vuLitL, int vuLitR, int peakL, int peakR) {
+    const bool radio  = (s.mode == Mode::Radio);
+    const bool player = (s.mode == Mode::ExternalInput) && (s.inputIndex == ml::kPlayerInputIndex);
 
-    marqueeDraw(s_station, c::kStationY, FontSize::XLarge, dc::kColorFg);   // [Prompt 35]
+    drawStatusBar(s);
+    drawClockBlock();
+    D::drawLine(ml::kSepX, ml::kBlockTop, ml::kSepX, ml::kBlockBottom, ml::kColorDivider);
+    drawWeatherBlock();
+    D::drawLine(ml::kSideMargin, ml::kDividerY, static_cast<int16_t>(ml::kRightX - 1), ml::kDividerY,
+                ml::kColorDivider);
 
-    // [Prompt 33] Обʼєднаний рядок «метадані / статус» (текст у s_track оновлює frame()).
-    uint16_t infoColor = c::kColorTrack;
-    (void)radioInfoLine(s, infoColor);
-    marqueeDraw(s_track, c::kTrackY, FontSize::Large, infoColor);   // [Prompt 35] Large
+    char name[kInputFitCap];   // [Prompt 23b]
+    if (radio) {
+        // Тег = назва входу («WiFi Radio»); назва станції й обʼєднаний рядок «метадані / статус» — marquee.
+        fitText(inputName(s), name, sizeof(name), FontSize::Tiny, ml::kContentW);
+        D::drawText(name, ml::kSideMargin, ml::kTagY, FontSize::Tiny, ml::kColorTag);
+        marqueeDraw(s_station, ml::kStationY, FontSize::XLarge, ml::kColorStation);
+        uint16_t infoColor = c::kColorTrack;
+        (void)radioInfoLine(s, infoColor);
+        marqueeDraw(s_track, ml::kTrackY, FontSize::Small, infoColor);
+    } else {
+        D::drawText(ua_text::kSourceExternal, ml::kSideMargin, ml::kTagY, FontSize::Tiny, ml::kColorTag);
+        fitText(inputName(s), name, sizeof(name), FontSize::XLarge, ml::kContentW);
+        const uint16_t color = (s.inputIndex >= 1 && s.inputIndex <= c::kColorInputNameCount)
+                                   ? c::kColorInputName[s.inputIndex - 1]
+                                   : dc::kColorFg;   // запасний колір, якщо індекс поза таблицею
+        D::drawText(name, ml::kSideMargin, ml::kStationY, FontSize::XLarge, color);
+        if (player) {
+            D::drawText(ua_text::kNoLink, ml::kSideMargin, ml::kTrackY, FontSize::Small, ml::kColorAmber);
+        }
+    }
 
-    drawVu(vuLitL, vuLitR, peakL, peakR);   // [Prompt 17], [Prompt 34] пік
-}
-
-void drawExternal(const AppStateData& s, int vuLitL, int vuLitR, int peakL, int peakR) {
-    // [Prompt 38] Верхня стрічка як на Radio: іконка Wi-Fi за RSSI + «SSID  IP» ліворуч.
-    drawTopIcons(s, true);
-    drawNetInfo(s);
-    // [Prompt 38] Напис "INPUT" прибрано; назва входу — XLarge, по центру вільної області, колір за
-    // номером входу (kColorInputName[inputIndex - 1]). Довге імʼя обрізається fitText() з "..." (marquee не потрібен: рядок
-    // статичний, а центрування й прокрутка разом виглядали б гірше).
-    char name[kInputFitCap];  // [Prompt 23b]
-    fitText(inputName(s), name, sizeof(name), FontSize::XLarge, c::kContentW);
-    const uint16_t color = (s.inputIndex >= 1 && s.inputIndex <= c::kColorInputNameCount)
-                               ? c::kColorInputName[s.inputIndex - 1]
-                               : dc::kColorFg;   // запасний колір, якщо індекс поза таблицею kColorInputName
-    drawCentered(name, c::kExtNameY, FontSize::XLarge, color);
-    // [Prompt 37] Той самий блок VU, що й у Radio (y = kVuY..): назва входу закінчується вище.
     drawVu(vuLitL, vuLitR, peakL, peakR);
+
+    char vol[8];
+    snprintf(vol, sizeof(vol), "%d", static_cast<int>(s.volume));
+    const int32_t vw = UiFonts::textWidth(vol, FontSize::XLarge);
+    // «Vol» і число — одна група (XLarge), відцентрована між кінцем VU і правим краєм контенту.
+    const int32_t lw = UiFonts::textWidth("Vol", FontSize::XLarge);
+    const int32_t zoneL = ml::kVuBarX + ml::kVuUsedW;
+    int32_t gx = zoneL + (ml::kRightX - zoneL - (lw + ml::kVolLabelGap + vw)) / 2;
+    if (gx < zoneL + 4) gx = zoneL + 4;
+    D::drawText("Vol", static_cast<int16_t>(gx), ml::kVolY, FontSize::XLarge,
+                s.mute ? ml::kColorVolumeMute : ml::kColorVuLabel);
+    D::drawText(vol, static_cast<int16_t>(gx + lw + ml::kVolLabelGap), ml::kVolY, FontSize::XLarge,
+                s.mute ? ml::kColorVolumeMute : ml::kColorVolume);
+    // Мʼют: слот 0 смуги іконок у правому верхньому куті блоку джерела (рядок тегу).
+    if (s.mute) D::drawIcon(IconId::Mute, ml::kVolMuteIconX, ml::kVolMuteIconY, c::kColorAccent);
 }
 
 void drawStationList(const AppStateData& s) {
@@ -748,51 +1103,74 @@ bool frame() {
     const AppStateData s = AppState::snapshot();   // один знімок на кадр
 
     handleModeChange(s.mode);
-    wifiBarsUpdate(s);   // [Prompt 36] гістерезис іконки Wi-Fi; зміна rssi вже дає dirty через memcmp
+    wifiBarsUpdate(s);   // [Prompt 36] гістерезис іконки Wi-Fi; зміна rssi вже дає зміну знімка
 
-    bool dirty = !s_havePrev || memcmp(&s, &s_prev, sizeof(s)) != 0;
-    if (dirty) {
+    // [S2c1] Основний екран = Radio / ExternalInput (не під час «тихого» перезапуску): 240 рядків, решта — 170.
+    const bool mainScreen = !s.restarting && (s.mode == Mode::Radio || s.mode == Mode::ExternalInput);
+
+    // full — потрібен повний вивід кадру (змінилось щось поза VU / marquee); інакше лише рядки [rowMin, rowMax).
+    bool full = !s_havePrev || memcmp(&s, &s_prev, sizeof(s)) != 0;
+    if (full) {
         s_prev = s;
         s_havePrev = true;
     }
+    if (static_cast<int>(s_wifiBars) != s_wifiBarsDrawn) {   // гістерезис змінив іконку без зміни знімка
+        s_wifiBarsDrawn = s_wifiBars;
+        full = true;
+    }
+    int rowMin = 0x7FFF;
+    int rowMax = -1;
+    auto markRows = [&rowMin, &rowMax](int y, int h) {
+        if (y < rowMin) rowMin = y;
+        if (y + h > rowMax) rowMax = y + h;
+    };
 
-    // [Prompt 17] VU: лише Radio + Playing, інакше рівні 0. read() == false (даних
-    // нема) теж дає 0. Перемальовуємо, коли змінилась кількість засвічених сегментів
-    // (під час музики це практично кожен кадр; у тиші чи на паузі екран знову статичний).
-    // [Prompt 34] Пік утримується в UI; без даних пік скидається, перемальовуємо при його зміні.
+    // [S2c1] Годинник і погода: неблокуючі знімки (раз на kClockPollMs / kWeatherPollMs), без мережі.
+    if (mainScreen) {
+        if (clockUpdate(now))   full = true;
+        if (weatherUpdate(now)) full = true;
+    }
+
+    // [Prompt 17] VU: лише Radio + Playing, інакше рівні 0. read() == false (даних нема) теж дає 0.
+    // [Prompt 34] Пік утримується в UI; без даних пік скидається.
+    // [S2c1] Player: VU порожні (без базових сегментів); зміна рівнів позначає лише смугу VU.
     int litL = 0;
     int litR = 0;
-    bool vuValid = false;
 #if ENABLE_VU
-    if (s.mode == Mode::Radio && s.streamStatus == StreamStatus::Playing) {
-        float vuL = 0.0f;
-        float vuR = 0.0f;
-        if (s_vu.read(vuL, vuR)) {
-            litL = vuToSegments(vuL);
-            litR = vuToSegments(vuR);
-            vuValid = true;
+    const bool isPlayer = (s.mode == Mode::ExternalInput) && (s.inputIndex == ml::kPlayerInputIndex);
+    if (mainScreen && !isPlayer) {
+        bool vuValid = false;
+        if (s.mode == Mode::Radio && s.streamStatus == StreamStatus::Playing) {
+            float vuL = 0.0f;
+            float vuR = 0.0f;
+            if (s_vu.read(vuL, vuR)) {
+                litL = vuToSegments(vuL);
+                litR = vuToSegments(vuR);
+                vuValid = true;
+            }
         }
-    }
 #if LINE_PATH_ENABLE
-    // [Prompt 48d] Зовнішні входи (будь-який inputIndex >= 1): рівні з line_path (VuSourceLinePath).
-    // Немає даних / прохід не працює —
-    // як у радіо: два базові сегменти, пік скинуто.
-    else if (s.mode == Mode::ExternalInput && s.inputIndex >= 1 && !s.restarting) {
-        float vuL = 0.0f;
-        float vuR = 0.0f;
-        if (s_vuLine.read(vuL, vuR)) {
-            litL = vuToSegments(vuL);
-            litR = vuToSegments(vuR);
-            vuValid = true;
+        // [Prompt 48d] Зовнішні входи (inputIndex >= 1): рівні з line_path (VuSourceLinePath).
+        else if (s.mode == Mode::ExternalInput && s.inputIndex >= 1) {
+            float vuL = 0.0f;
+            float vuR = 0.0f;
+            if (s_vuLine.read(vuL, vuR)) {
+                litL = vuToSegments(vuL);
+                litR = vuToSegments(vuR);
+                vuValid = true;
+            }
         }
-    }
 #endif
-    // Базовий рівень: перші kVuMinSegments сегментів світяться завжди (тиша, пауза, обрив).
-    if (litL < c::kVuMinSegments) litL = c::kVuMinSegments;
-    if (litR < c::kVuMinSegments) litR = c::kVuMinSegments;
-    if (vuValid) {
-        vuPeakUpdate(s_peakL, litL, now);
-        vuPeakUpdate(s_peakR, litR, now);
+        // Базовий рівень: перші kVuMinSegments сегментів світяться завжди (тиша, пауза, обрив).
+        if (litL < ml::kVuMinSegments) litL = ml::kVuMinSegments;
+        if (litR < ml::kVuMinSegments) litR = ml::kVuMinSegments;
+        if (vuValid) {
+            vuPeakUpdate(s_peakL, litL, now);
+            vuPeakUpdate(s_peakR, litR, now);
+        } else {
+            vuPeakReset(s_peakL);
+            vuPeakReset(s_peakR);
+        }
     } else {
         vuPeakReset(s_peakL);
         vuPeakReset(s_peakR);
@@ -800,16 +1178,16 @@ bool frame() {
 #endif
     if (litL != s_vuLitL || litR != s_vuLitR || s_peakL.seg != s_vuPeakDrawnL ||
         s_peakR.seg != s_vuPeakDrawnR) {
-        dirty = true;
         s_vuLitL = litL;
         s_vuLitR = litR;
         s_vuPeakDrawnL = s_peakL.seg;
         s_vuPeakDrawnR = s_peakR.seg;
+        if (mainScreen) markRows(ml::kVuLY, ml::kVuBandH);
     }
 
     // [Prompt 32] Спливне вікно: нова подія (popupSeq змінився) запускає/продовжує показ;
     // поза Radio/ExternalInput (і під час перезапуску) вікно ховається й не повертається саме.
-    const bool popupMode = (s.mode == Mode::Radio || s.mode == Mode::ExternalInput) && !s.restarting;
+    const bool popupMode = mainScreen;
     if (!s_popupSeqKnown) {
         s_popupSeqKnown = true;                 // перший кадр: не вважати старе значення подією
         s_popupSeqSeen  = s.popupSeq;
@@ -824,16 +1202,17 @@ bool frame() {
         s_popupActive = false;
     } else if (s_popupActive && s.popupDismissed) {
         s_popupActive = false;                  // [Prompt 49d] кнопка / клік енкодера / IR — сховати одразу
-        dirty = true;                           // перемалювати кадр без вікна
+        full = true;                            // перемалювати кадр без вікна
     } else if (s_popupActive && static_cast<int32_t>(now - s_popupUntilMs) >= 0) {
         s_popupActive = false;
-        dirty = true;                           // перемалювати кадр без вікна
+        full = true;                            // перемалювати кадр без вікна
     }
 
-    if (s.mode == Mode::Radio) {
-        dirty |= marqueeUpdate(s_station, s.stationName[0] ? s.stationName : "No station",
-                               FontSize::XLarge, now);   // [Prompt 35]
-
+    if (mainScreen && s.mode == Mode::Radio) {
+        // [Prompt 35] Назва станції — XLarge; [S2c1] marquee лише позначає свої рядки (часткова передача).
+        if (marqueeUpdate(s_station, s.stationName[0] ? s.stationName : "No station", FontSize::XLarge, now)) {
+            markRows(ml::kStationY, dc::kFontXLargePx);
+        }
         // [Prompt 33] Зміна станції — рядок «метадані / статус» починається спочатку (навіть якщо
         // текст не змінився). Зміну самого тексту (метадані ↔ статус, нові метадані) marqueeUpdate
         // ловить сам через strcmp.
@@ -844,11 +1223,14 @@ bool frame() {
         }
         uint16_t infoColor = c::kColorTrack;   // колір тут не потрібен, лише текст
         const char* info = radioInfoLine(s, infoColor);
-        dirty |= marqueeUpdate(s_track, info, FontSize::Large, now);   // [Prompt 35]
+        if (marqueeUpdate(s_track, info, FontSize::Small, now)) {   // [S2c1] Small (було Large)
+            markRows(ml::kTrackY, dc::kFontSmallPx);
+        }
     }
 
-    if (!dirty) return false;   // панель лишається як була
+    if (!full && rowMax < 0) return false;   // панель лишається як була
 
+    D::setFullPanel(mainScreen);              // [S2c1] 240 рядків для основного екрана, 170 для решти
     D::fillScreen(dc::kColorBg);
     if (s.restarting) {  // [Prompt 28] «тихий» перезапуск: один рядок замість будь-якого екрана
         drawPlaceholder("Restarting...");  // три крапки ASCII: U+2026 немає у шрифті
@@ -856,8 +1238,8 @@ bool frame() {
     }
     switch (s.mode) {
         case Mode::Standby:       drawStandby();                 break;
-        case Mode::Radio:         drawRadio(s, litL, litR, s_peakL.seg, s_peakR.seg); break;
-        case Mode::ExternalInput: drawExternal(s, litL, litR, s_peakL.seg, s_peakR.seg); break;   // [Prompt 37]
+        case Mode::Radio:
+        case Mode::ExternalInput: drawMain(s, litL, litR, s_peakL.seg, s_peakR.seg); break;   // [S2c1]
         case Mode::Menu:
             if (s.menuContext == MenuContext::StationList)    drawStationList(s);
             else if (s.menuContext == MenuContext::EqBalance) drawEqBalance(s);   // [Prompt 49a/49b]
@@ -869,6 +1251,10 @@ bool frame() {
         default:                  drawPlaceholder("?");          break;
     }
     if (s_popupActive) drawPopup(s);   // [Prompt 32] останній шар кадру
+    // [S2c1] Змінились лише VU / marquee: передати тільки їхні рядки (буфер перемальовано повністю).
+    if (mainScreen && ml::kPartialPush && !full && rowMax > rowMin) {
+        D::setPushBand(static_cast<int16_t>(rowMin), static_cast<int16_t>(rowMax - rowMin));
+    }
     return true;
 }
 
@@ -887,12 +1273,15 @@ bool UiScreens::begin() {
 #if ENABLE_VU
     vuPeakReset(s_peakL);
     vuPeakReset(s_peakR);
-    vuScaleInit();   // [Prompt 34] після DisplayManager::begin() (метрики шрифтів)
 #endif
+    // [S2c1] Знімки годинника / погоди: нульові (valid = false) -> перший же кадр вважається зміною.
+    s_clock = ClockView();
+    s_wx    = WeatherView();
+    s_clockPolled   = false;
+    s_weatherPolled = false;
+    s_wifiBarsDrawn = -1;
     s_popupSeqKnown = false;   // [Prompt 32]
     s_popupActive   = false;
     DisplayManager::setFrameCallback(&frame);
     return true;
 }
-
-

@@ -1,6 +1,9 @@
 #pragma once
 
 // Константи модуля ui/screens (розкладка 320×170, кольори, marquee, standby).
+// [S2c1] Основний екран (Radio / ExternalInput) — namespace screens_cfg::main_layout (320×240);
+// константи Radio / ExternalInput / VU / верхньої смуги вище (kTop*, kNet*, kStation*, kTrack*, kVu*,
+// kExt*) з S2c1 НЕ використовуються й лишені для сумісності static_assert (прибрати в S2c2).
 // Шрифти: XLarge 36 px (назва станції P35, назва зовнішнього входу P38), Large 24 px, Small 17 px, Tiny 14 px; іконка 24×24
 // (display_config.h).
 
@@ -250,5 +253,160 @@ static_assert(kVuMinSegments < kVuRedSeg, "VU base level must stay below the ove
 static_assert(kVuRedSeg > 0 && kVuRedSeg < kVuSegments, "VU overload segment out of range");
 static_assert(kVuPeakHoldMs > 0 && kVuPeakFallMs > 0, "VU peak timings must be positive");
 static_assert(kVuScaleMarkCount > 0 && vuMarksValid(), "VU scale marks must lie in (kDbFloor, 0] ascending");
+
+// ---------------------------------------------------------------------------
+// [S2c1] ОСНОВНИЙ ЕКРАН 320×240 (Radio / ExternalInput, включно з Computer / Aux / Player).
+// Малюється на ВСЮ панель (display_cfg::kPanelH рядків); решта екранів лишаються у верхніх
+// kLegacyViewportH рядках до S2c2. Усі координати — тут, у screens.cpp литеральних немає.
+// Вертикальна карта (y, пікселів):
+//   0..23    смуга стану (іконка Wi-Fi, SSID ліворуч, IP праворуч)
+//   28..100  блок годинника (ліворуч) і погоди (праворуч), вертикальний роздільник
+//   104      горизонтальний роздільник
+//   109..123 тег джерела (Tiny) · 125..161 назва станції / входу (XLarge)
+//   163..180 рядок треку / «Немає зв'язку» (Small)
+//   189..231 два рядки VU (L / R) і число гучності (XLarge) праворуч
+// ---------------------------------------------------------------------------
+namespace main_layout {
+
+constexpr int16_t kPanelW     = display_cfg::kPanelW;    // 320
+constexpr int16_t kPanelH     = display_cfg::kPanelH;    // 240
+constexpr int16_t kSideMargin = 8;
+constexpr int16_t kRightX     = kPanelW - kSideMargin;   // 312: права межа контенту
+constexpr int16_t kContentW   = kPanelW - 2 * kSideMargin;   // 304: ширина marquee (== screens_cfg::kContentW)
+
+// Індекс входу «Плеєр» (= inputs_cfg::kPlayer зі спеки D2a; тут через defaults::kInputCount, бо
+// inputs_config.h не прикріплено). Радіо = 0.
+constexpr uint8_t kPlayerInputIndex = static_cast<uint8_t>(defaults::kInputCount - 1);
+
+// --- Оновлення / продуктивність ---
+// true: якщо змінились лише VU і / або marquee (решта кадру ідентична попередньому), на панель
+// передаються лише рядки, що містять ці елементи (передача 320×240 ≈ 31 мс при 40 МГц проти періоду
+// кадру 40 мс; смуга VU 42 рядки ≈ 5,4 мс). false: завжди всі 240 рядків.
+constexpr bool     kPartialPush    = true;
+constexpr uint32_t kClockPollMs    = 250;      // як часто перечитувати час (getLocal)
+constexpr uint32_t kWeatherPollMs  = 1000;     // як часто брати знімок погоди (getStatus)
+constexpr uint32_t kWeatherStaleMs = 2UL * 60UL * 60UL * 1000UL;   // дані старші — приглушений колір
+
+// --- Кольори ---
+constexpr uint16_t kColorBg         = display_cfg::kColorBlack;
+constexpr uint16_t kColorStatusBg   = display_cfg::rgb565(22, 25, 34);
+constexpr uint16_t kColorStatusText = display_cfg::rgb565(160, 160, 160);
+constexpr uint16_t kColorDivider    = display_cfg::rgb565(48, 52, 64);
+constexpr uint16_t kColorAmber      = display_cfg::rgb565(255, 176, 0);   // бурштиновий
+constexpr uint16_t kColorClock      = display_cfg::kColorWhite;
+constexpr uint16_t kColorClockDim   = display_cfg::rgb565(110, 110, 118); // «--:--»
+constexpr uint16_t kColorDate       = display_cfg::rgb565(190, 190, 200);
+constexpr uint16_t kColorTemp       = display_cfg::kColorWhite;
+constexpr uint16_t kColorWxCity     = display_cfg::rgb565(200, 200, 210);
+constexpr uint16_t kColorWxState    = display_cfg::rgb565(150, 155, 170);
+constexpr uint16_t kColorWxStale    = display_cfg::rgb565(95, 95, 100);   // застарілі / відсутні дані
+constexpr uint16_t kColorTag        = display_cfg::rgb565(110, 170, 255);
+constexpr uint16_t kColorStation    = display_cfg::kColorWhite;
+constexpr uint16_t kColorVolume     = display_cfg::kColorWhite;
+constexpr uint16_t kColorVolumeMute = display_cfg::kColorGray;
+// Іконки погоди (малюються з примітивів).
+constexpr uint16_t kColorSun        = display_cfg::rgb565(255, 200, 0);
+constexpr uint16_t kColorMoon       = display_cfg::rgb565(225, 225, 190);
+constexpr uint16_t kColorCloudLight = display_cfg::rgb565(205, 210, 222);
+constexpr uint16_t kColorCloudDark  = display_cfg::rgb565(140, 146, 160);
+constexpr uint16_t kColorRain       = display_cfg::rgb565(80, 150, 255);
+constexpr uint16_t kColorSnow       = display_cfg::kColorWhite;
+constexpr uint16_t kColorBolt       = display_cfg::rgb565(255, 220, 0);
+constexpr uint16_t kColorFog        = display_cfg::rgb565(170, 176, 190);
+
+// --- Смуга стану ---
+// Іконки Wi-Fi 24×24 мають «чорнило» в рядках 2..21 (виміряно за масками icons.cpp), тож смуга 24.
+constexpr int16_t kStatusH     = 24;
+constexpr int16_t kStatusIconX = 4;
+constexpr int16_t kStatusIconY = 0;
+constexpr int16_t kStatusTextX = kStatusIconX + display_cfg::kIconSize + 2;
+constexpr int16_t kStatusTextY = (kStatusH - display_cfg::kFontTinyPx) / 2;
+constexpr int16_t kStatusGap   = 10;     // між SSID і IP
+
+// --- Годинник (FontSize::Clock; верх цифр, а не верх рядка шрифту) ---
+constexpr int16_t kClockX            = kSideMargin;
+constexpr int16_t kClockDigitTopY    = 33;    // верх цифр
+constexpr int16_t kClockDigitH       = 36;    // макс. висота цифри (S2c0: 34..36)
+constexpr int16_t kClockFontTopInset = 10;    // верх рядка шрифту -> верх цифри (S2c0: 9..10, Pillow; ВИМІРЯТИ)
+constexpr int16_t kClockDy           = 12;    // виміряно на залізі (фото 2026-11-28): цифри стояли на y~17 замість 29
+constexpr int16_t kClockFontY        = kClockDigitTopY - kClockFontTopInset + kClockDy;
+constexpr int16_t kDateY             = kClockDigitTopY + kClockDigitH + 8;   // Small, під цифрами
+constexpr int16_t kSepX              = 154;   // вертикальний роздільник годинник | погода
+constexpr int16_t kClockBlockW       = kSepX - kSideMargin - 4;              // ширина рядка дати
+constexpr int16_t kClockCenterX       = (kSideMargin + kSepX) / 2;   // вісь блоку годинника
+
+// --- Погода ---
+constexpr int16_t kWeatherX        = 162;
+constexpr int16_t kWeatherW        = kRightX - kWeatherX;
+constexpr int16_t kWeatherIconSize = 36;
+constexpr int16_t kBlockTop        = kStatusH + 4;
+constexpr int16_t kCityY           = kBlockTop;                                    // Small, верх блоку
+constexpr int16_t kWeatherIconY    = kCityY + display_cfg::kFontSmallPx + 1;       // рядок «іконка | стан | температура»
+constexpr int16_t kTempY           = kWeatherIconY;                                // XLarge, прижата до kRightX
+constexpr int16_t kStateY          = kWeatherIconY + kWeatherIconSize + 4;         // нижній рядок Tiny: вітер, вологість, тиск
+constexpr int16_t kBlockBottom     = kStateY + display_cfg::kFontTinyPx;
+constexpr int16_t kDividerY        = kBlockBottom + 4;
+
+// --- Джерело, назва, рядок треку ---
+constexpr int16_t kTagY     = kDividerY + 5;                                   // Tiny
+constexpr int16_t kStationY = kTagY + display_cfg::kFontTinyPx + 2;            // XLarge
+constexpr int16_t kTrackY   = kStationY + display_cfg::kFontXLargePx + 2;      // Small
+
+// --- VU (два рядки) і гучність ---
+constexpr int16_t  kVuLabelX    = kSideMargin;                 // «L» / «R» (Tiny)
+constexpr int16_t  kVuBarX      = 22;
+constexpr uint8_t  kVuSegments  = 27;
+constexpr int16_t  kVuSegW      = 5;
+constexpr int16_t  kVuSegGap    = 1;
+constexpr int16_t  kVuSegPitch  = kVuSegW + kVuSegGap;
+constexpr int16_t  kVuUsedW     = kVuSegments * kVuSegPitch - kVuSegGap;
+constexpr int16_t  kVuBarH      = 18;
+constexpr int16_t  kVuRowGap    = 6;
+constexpr int16_t  kVuLY        = 189;
+constexpr int16_t  kVuRY        = kVuLY + kVuBarH + kVuRowGap;
+constexpr int16_t  kVuBandH     = kVuRY + kVuBarH - kVuLY;     // рядки, що передаються при «лише VU»
+// Пороги кольору: зелений до kVuAmberFromDb, бурштиновий до vu_cfg::kRedFrom, далі червоний.
+// ПРИМІТКА: vu_cfg::kYellowFrom (0,70 ≈ −6 дБ) тут не використовується: за макетом власника зелений до ≈ −9 дБ.
+constexpr float    kVuAmberFromDb = -9.0f;
+constexpr uint8_t  kVuAmberSeg  = static_cast<uint8_t>(
+    (kVuAmberFromDb - vu_cfg::kDbFloor) / (-vu_cfg::kDbFloor) * kVuSegments + 0.5f);
+constexpr uint8_t  kVuRedSeg    = static_cast<uint8_t>(vu_cfg::kRedFrom * kVuSegments + 0.5f);
+constexpr uint8_t  kVuMinSegments = 2;                         // базовий рівень Radio / Computer / Aux (не Player)
+constexpr uint32_t kVuPeakHoldMs  = 100;
+constexpr uint32_t kVuPeakFallMs  = 60;
+constexpr uint16_t kColorVuGreen    = display_cfg::rgb565(0, 215, 70);
+constexpr uint16_t kColorVuGreenOff = display_cfg::rgb565(6, 40, 18);
+constexpr uint16_t kColorVuAmber    = kColorAmber;
+constexpr uint16_t kColorVuAmberOff = display_cfg::rgb565(52, 36, 0);
+constexpr uint16_t kColorVuRed      = display_cfg::rgb565(255, 50, 40);
+constexpr uint16_t kColorVuRedOff   = display_cfg::rgb565(52, 14, 12);
+constexpr uint16_t kColorVuLabel    = display_cfg::rgb565(150, 160, 170);
+// Число гучності (XLarge, праворуч) і іконка мʼюту ліворуч від нього (лише коли мʼют).
+constexpr int16_t  kVolY         = kVuLY + (kVuBandH - display_cfg::kFontXLargePx) / 2;
+constexpr int16_t  kIconStripPitch = display_cfg::kIconSize + 4;
+constexpr int16_t  kVolMuteIconX = kRightX - display_cfg::kIconSize;   // слот 0 (крайній правий)
+constexpr int16_t  kVolMuteIconY = kTagY - 4;
+constexpr int16_t  kVolLabelGap = 8;   // між «Vol» і числом
+constexpr int16_t  kWindArrowW  = 12;   // ширина слоту стрілки напрямку вітру
+constexpr int16_t  kWindArrowR  = 5;    // півдовжина стрілки
+
+static_assert(kContentW == screens_cfg::kContentW, "marquee width must match screens_cfg::kContentW");
+static_assert(defaults::kInputCount >= 2, "player input index must be an external input");
+static_assert(kStatusH >= display_cfg::kIconSize, "status bar must hold the 24 px Wi-Fi icon");
+static_assert(kClockFontY >= 0, "clock font line must start on the screen");
+static_assert(kDateY + display_cfg::kFontSmallPx < kDividerY, "date overlaps the divider");
+static_assert(kClockBlockW > 100, "date row too narrow");
+static_assert(kWeatherX > kSepX + 4 && kWeatherW >= 120, "weather block too narrow");
+static_assert(kStateY + display_cfg::kFontTinyPx < kDividerY, "weather state row overlaps the divider");
+static_assert(kTrackY + display_cfg::kFontSmallPx + 4 <= kVuLY, "track row overlaps the VU block");
+static_assert(kVuRY + kVuBarH + 4 <= kPanelH, "VU block leaves the screen");
+static_assert(kVolMuteIconY >= kDividerY && kVolMuteIconY + 20 <= kStationY, "icon strip must sit in the tag row");
+static_assert(kVuBarX + kVuUsedW + 8 <= kRightX - 3 * 19 - kVolLabelGap - 52, "VU bars collide with the Vol label");
+static_assert(kVuAmberSeg > kVuMinSegments && kVuAmberSeg < kVuRedSeg && kVuRedSeg < kVuSegments,
+              "VU zones must satisfy min < amber < red < segments");
+static_assert(kVuPeakHoldMs > 0 && kVuPeakFallMs > 0, "VU peak timings must be positive");
+static_assert(kClockPollMs > 0 && kWeatherPollMs > 0 && kWeatherStaleMs > 0, "poll / stale intervals must be positive");
+
+}  // namespace main_layout
 
 }  // namespace screens_cfg

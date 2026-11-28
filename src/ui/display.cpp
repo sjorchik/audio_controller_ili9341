@@ -98,13 +98,14 @@ lgfx::LGFX_Sprite* const s_bufs[display_cfg::kBufferCount] = {&s_spr0, &s_spr1};
 static_assert(display_cfg::kBufferCount == 2, "double buffering expects exactly 2 buffers");
 
 // Скільки верхніх рядків спрайта малюється й виводиться на панель щокадру.
-// Звичайна робота — лише область екранів; у DISPLAY_DEMO — вся панель 320×240.
+// [S2c1] Звичайна робота: область екранів (kLegacyViewportH) або, коли екран просить
+// DisplayManager::setFullPanel(true), вся панель; у DISPLAY_DEMO завжди вся панель 320×240.
 #if DISPLAY_DEMO
-constexpr int16_t kDrawH = display_cfg::kPanelH;
+constexpr int16_t kLegacyDrawH = display_cfg::kPanelH;
 #else
-constexpr int16_t kDrawH = display_cfg::kLegacyViewportH;
+constexpr int16_t kLegacyDrawH = display_cfg::kLegacyViewportH;
 #endif
-static_assert(kDrawH > 0 && kDrawH <= display_cfg::kPanelH, "draw height must fit into the panel");
+static_assert(kLegacyDrawH > 0 && kLegacyDrawH <= display_cfg::kPanelH, "draw height must fit into the panel");
 
 // ---------------------------------------------------------------------------
 // Стан
@@ -118,6 +119,22 @@ volatile bool s_flipRequested = display_cfg::kDefaultFlipped;  // бажана �
 bool s_flipApplied = display_cfg::kDefaultFlipped;             // застосована (лише display-задача)
 DisplayManager::FrameCallback volatile s_frameCb = nullptr;
 DisplayError s_error = DisplayError::NotStarted;
+
+// [S2c1] Лише display-задача (і begin() до старту задачі).
+int16_t s_drawH = kLegacyDrawH;      // скільки верхніх рядків малюється й виводиться
+bool s_clearBottomPending = false;   // стерти нижню смугу панелі при наступному виводі
+bool s_forceFullPush = false;        // наступний вивід — повний кадр (після повороту панелі)
+int16_t s_bandY = 0;                 // смуга часткової передачі для НАСТУПНОГО present()
+int16_t s_bandH = 0;                 // 0 = без смуги
+
+#if DISPLAY_PERF
+struct PerfStats {
+    uint32_t lastLogMs, frames, over;
+    uint32_t fullN, fullUs, bandN, bandUs, bandRows, pushMaxUs;
+    uint32_t drawN, drawUs, drawMaxUs;
+};
+PerfStats s_perf = {};
+#endif
 
 // ---------------------------------------------------------------------------
 // Допоміжне
@@ -168,6 +185,7 @@ bool applyRotation() {
     // екранів зараз повторно виведе taskLoop.
     s_lcd.fillScreen(display_cfg::kColorBlack);
     s_flipApplied = want;
+    s_forceFullPush = true;   // [S2c1] панель щойно очищено: смуга не підходить
     Serial.printf("%s rotation %u (%s)\n", kTag, static_cast<unsigned>(rotationFor(want)),
                   want ? "flipped 180" : "normal");
     return true;
@@ -183,19 +201,63 @@ lgfx::LGFX_Sprite& backBuffer() {
     return *s_bufs[s_back & 1u];
 }
 
-void pushBuffer(uint8_t idx) {
+// [S2c1] Повертає кількість виведених рядків. allowBand = false — завжди весь кадр (повторний
+// вивід після повороту). Смуга (s_bandY / s_bandH) діє на один вивід і скидається тут.
+int16_t pushBuffer(uint8_t idx, bool allowBand) {
     lgfx::LGFX_Sprite* spr = s_bufs[idx];
-    // Рядки спрайта йдуть підряд, тож перші kDrawH рядків — це початок буфера.
+    // Рядки спрайта йдуть підряд, тож рядок y — це зміщення y * kWidth від початку буфера.
     // Спрайт RGB565 зберігає байти вже в порядку шини, тому тип swap565_t.
     const auto* data = reinterpret_cast<const lgfx::swap565_t*>(spr->getBuffer());
+    const bool band = allowBand && s_bandH > 0 && !s_forceFullPush && !s_clearBottomPending &&
+                      s_bandY >= 0 && s_bandY + s_bandH <= s_drawH;
+    const int16_t y0 = band ? s_bandY : static_cast<int16_t>(0);
+    const int16_t h  = band ? s_bandH : s_drawH;
     s_lcd.startWrite();
+    if (s_clearBottomPending) {
+        // Перехід «вся панель» -> «область екранів»: нижня смуга панелі ще містить старий кадр.
+        if (s_drawH < display_cfg::kPanelH) {
+            s_lcd.fillRect(0, s_drawH, display_cfg::kPanelW,
+                           static_cast<int16_t>(display_cfg::kPanelH - s_drawH),
+                           display_cfg::kColorBlack);
+        }
+        s_clearBottomPending = false;
+    }
+    const auto* src = data + static_cast<size_t>(y0) * display_cfg::kWidth;
     if (display_cfg::kUseDma) {
-        s_lcd.pushImageDMA(0, 0, display_cfg::kWidth, kDrawH, data);
+        s_lcd.pushImageDMA(0, y0, display_cfg::kWidth, h, src);
     } else {
-        s_lcd.pushImage(0, 0, display_cfg::kWidth, kDrawH, data);
+        s_lcd.pushImage(0, y0, display_cfg::kWidth, h, src);
     }
     s_lcd.endWrite();
+    s_forceFullPush = false;
+    s_bandH = 0;
+    return h;
 }
+
+#if DISPLAY_PERF
+// Раз на 5 с друкує статистику часу кадру й обнуляє лічильники (лише display-задача).
+void perfReport() {
+    const uint32_t now = millis();
+    if (s_perf.lastLogMs == 0) {
+        s_perf.lastLogMs = now;
+        return;
+    }
+    if (now - s_perf.lastLogMs < 5000u) return;
+    PerfStats& p = s_perf;
+    const unsigned fullAvg = p.fullN ? static_cast<unsigned>(p.fullUs / p.fullN) : 0u;
+    const unsigned bandAvg = p.bandN ? static_cast<unsigned>(p.bandUs / p.bandN) : 0u;
+    const unsigned bandRows = p.bandN ? static_cast<unsigned>(p.bandRows / p.bandN) : 0u;
+    const unsigned drawAvg = p.drawN ? static_cast<unsigned>(p.drawUs / p.drawN) : 0u;
+    Serial.printf("%s perf 5s: frames=%lu over=%lu | draw avg=%u max=%lu us | push full n=%lu avg=%u us, "
+                  "band n=%lu avg=%u us (rows %u), max=%lu us | drawH=%d\n",
+                  kTag, static_cast<unsigned long>(p.frames), static_cast<unsigned long>(p.over), drawAvg,
+                  static_cast<unsigned long>(p.drawMaxUs), static_cast<unsigned long>(p.fullN), fullAvg,
+                  static_cast<unsigned long>(p.bandN), bandAvg, bandRows,
+                  static_cast<unsigned long>(p.pushMaxUs), static_cast<int>(s_drawH));
+    p = PerfStats();
+    p.lastLogMs = now;
+}
+#endif
 
 void taskEntry(void*) {
     DisplayManager::taskLoop();
@@ -395,11 +457,30 @@ void DisplayManager::taskLoop() {
 #else
         FrameCallback cb = s_frameCb;
 #endif
-        if (cb != nullptr && cb()) {
+#if DISPLAY_PERF
+        const uint32_t tDraw0 = micros();
+#endif
+        const bool drawn = (cb != nullptr) && cb();
+#if DISPLAY_PERF
+        if (drawn) {
+            const uint32_t d = micros() - tDraw0;
+            s_perf.drawN++;
+            s_perf.drawUs += d;
+            if (d > s_perf.drawMaxUs) s_perf.drawMaxUs = d;
+        }
+#endif
+        if (drawn) {
             present();
         } else if (rotated) {
-            pushBuffer((s_back ^ 1u) & 1u);
+            pushBuffer((s_back ^ 1u) & 1u, false);   // [S2c1] повний кадр
         }
+#if DISPLAY_PERF
+        if (drawn || rotated) {
+            s_perf.frames++;
+            if (micros() - tDraw0 > display_cfg::kFramePeriodMs * 1000u) s_perf.over++;
+        }
+        perfReport();
+#endif
         // [Prompt 35] xTaskDelayUntil НЕ блокує, якщо кадр тривав довше за період (повертає pdFALSE):
         // за серії таких кадрів задача на ядрі 0 монополізувала б CPU й голодила IDLE0 -> task_wdt.
         // Тоді примусово віддаємо процесор мінімум на один тік і перезапускаємо відлік.
@@ -461,15 +542,41 @@ int16_t DisplayManager::height() {
     return display_cfg::kHeight;
 }
 
+// [S2c1] Висота виводу: 170 рядків (область екранів) або вся панель. Лише display-задача.
+void DisplayManager::setFullPanel(bool full) {
+#if !DISPLAY_DEMO
+    const int16_t want = full ? display_cfg::kPanelH : display_cfg::kLegacyViewportH;
+    if (want == s_drawH) return;
+    if (want < s_drawH) s_clearBottomPending = true;   // нижню смугу панелі треба стерти
+    s_drawH = want;
+    s_bandH = 0;                                       // смуга з попередньої висоти недійсна
+#else
+    (void)full;
+#endif
+}
+
+bool DisplayManager::isFullPanel() {
+    return s_drawH == display_cfg::kPanelH;
+}
+
+// [S2c1] Смуга для наступного present(); поза межами виведеного — ігнорується (повний кадр).
+void DisplayManager::setPushBand(int16_t y, int16_t h) {
+    if (h <= 0 || y < 0 || y + h > s_drawH) {
+        s_bandH = 0;
+        return;
+    }
+    s_bandY = y;
+    s_bandH = h;
+}
+
 // ---------------------------------------------------------------------------
 // Примітиви (поверх заднього буфера)
 // ---------------------------------------------------------------------------
 
 void DisplayManager::fillScreen(uint16_t color) {
     if (!s_ready) return;
-    // Лише область, що виводиться на панель (kDrawH рядків); нижня смуга спрайта чорна
-    // з begin() і не перемальовується щокадру.
-    backBuffer().fillRect(0, 0, display_cfg::kWidth, kDrawH, color);
+    // Лише область, що виводиться на панель (s_drawH рядків: 170 або, у режимі setFullPanel(true), 240).
+    backBuffer().fillRect(0, 0, display_cfg::kWidth, s_drawH, color);
 }
 
 void DisplayManager::fillRect(int16_t x, int16_t y, int16_t w, int16_t h, uint16_t color) {
@@ -523,7 +630,26 @@ void DisplayManager::present() {
     applyRotation();  // якщо запит на поворот прийшов між кадрами
 
     const uint8_t idx = s_back & 1u;
-    pushBuffer(idx);
+#if DISPLAY_PERF
+    const uint32_t tPush0 = micros();
+#endif
+    const int16_t rows = pushBuffer(idx, true);
+#if DISPLAY_PERF
+    {
+        const uint32_t d = micros() - tPush0;
+        if (d > s_perf.pushMaxUs) s_perf.pushMaxUs = d;
+        if (rows < s_drawH) {
+            s_perf.bandN++;
+            s_perf.bandUs += d;
+            s_perf.bandRows += static_cast<uint32_t>(rows);
+        } else {
+            s_perf.fullN++;
+            s_perf.fullUs += d;
+        }
+    }
+#else
+    (void)rows;
+#endif
     s_back = idx ^ 1u;  // наступний кадр малюємо в інший буфер
 
     // Підсвітка вмикається лише після виводу першого кадру (без спалаху сміття).
