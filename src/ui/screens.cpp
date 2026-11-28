@@ -73,6 +73,10 @@
 // Часткова передача: якщо змінились лише VU і / або рядки marquee, на панель іде лише смуга з цими
 // рядками (DisplayManager::setPushBand), інакше весь кадр. Мова написів основного екрана — українська
 // (рішення власника 2026-11-27); «Restarting...», EQ, список станцій тощо — як раніше.
+// [S2c2a] Екран «EQ + Balance» (Mode::Menu + MenuContext::EqBalance) теж виводиться на ВСЮ панель 320×240
+// (DisplayManager::setFullPanel(true)): шапка-смуга з назвою входу, показник вибраної смуги (частота й значення в дБ),
+// вищі стовпчики; розкладка й кольори — config/eq_screen_config.h (палітра з main_layout). Спливне вікно (Гучність /
+// Баланс) центроване на панелі 320×240, розкладка — screens_cfg::popup_layout. Поведінку (вибір, діапазон, таймаути) не змінено.
 
 namespace {
 
@@ -80,6 +84,7 @@ using D = DisplayManager;
 namespace c = screens_cfg;
 namespace dc = display_cfg;
 namespace ml = screens_cfg::main_layout;
+namespace pl = screens_cfg::popup_layout;   // [S2c2a] спливне вікно 320×240
 
 static_assert(std::is_trivially_copyable<AppStateData>::value,
               "AppStateData має бути POD для memcmp");
@@ -725,30 +730,32 @@ void drawWeatherBlock() {
 // (як було в статус-рядку). Гучність — без знака.
 // [P48b-фікс] Баланс береться з AppStateData::balanceDb (дБ, −20..+20, баланс активного входу),
 // [P50b] AdjustTarget має лише Volume і Balance; legacy-цілі тембру / gain видалено.
+// [S2c2a] Геометрія, кольори й підписи — screens_cfg::popup_layout (центр панелі 320×240; вікно малюється лише поверх
+// основного екрана, що виводиться на всю панель). Підписи українською, значення — Digits.
 void drawPopup(const AppStateData& s) {
     const char* label = "";
     int value = 0;
     bool signedValue = false;
     switch (s.popupTarget) {
-        case AdjustTarget::Volume:  label = "Volume";    value = s.volume;  break;
-        case AdjustTarget::Balance: label = "Balance";   value = s.balanceDb; signedValue = true; break;   // [P48b-фікс]
+        case AdjustTarget::Volume:  label = pl::kLabelVolume;  value = s.volume;    break;
+        case AdjustTarget::Balance: label = pl::kLabelBalance; value = s.balanceDb; signedValue = true; break;   // [P48b-фікс]
     }
     char buf[8];
     if (signedValue && value != 0) snprintf(buf, sizeof(buf), "%+d", value);
     else                           snprintf(buf, sizeof(buf), "%d", value);
 
-    D::fillRect(c::kPopupX, c::kPopupY, c::kPopupW, c::kPopupH, c::kColorPopupBorder);
-    D::fillRect(static_cast<int16_t>(c::kPopupX + c::kPopupBorder),
-                static_cast<int16_t>(c::kPopupY + c::kPopupBorder),
-                static_cast<int16_t>(c::kPopupW - 2 * c::kPopupBorder),
-                static_cast<int16_t>(c::kPopupH - 2 * c::kPopupBorder), c::kColorPopupBg);
+    D::fillRect(pl::kX, pl::kY, pl::kW, pl::kH, pl::kColorBorder);
+    D::fillRect(static_cast<int16_t>(pl::kX + pl::kBorder),
+                static_cast<int16_t>(pl::kY + pl::kBorder),
+                static_cast<int16_t>(pl::kW - 2 * pl::kBorder),
+                static_cast<int16_t>(pl::kH - 2 * pl::kBorder), pl::kColorBg);
 
     const int32_t lw = UiFonts::textWidth(label, FontSize::Large);
-    D::drawText(label, static_cast<int16_t>(c::kPopupX + (c::kPopupW - lw) / 2), c::kPopupLabelY,
-                FontSize::Large, c::kColorPopupLabel);
+    D::drawText(label, static_cast<int16_t>(pl::kX + (pl::kW - lw) / 2), pl::kLabelY,
+                FontSize::Large, pl::kColorLabel);
     const int32_t dw = UiFonts::textWidth(buf, FontSize::Digits);
-    D::drawText(buf, static_cast<int16_t>(c::kPopupX + (c::kPopupW - dw) / 2), c::kPopupDigitsY,
-                FontSize::Digits, c::kColorPopupDigits);
+    D::drawText(buf, static_cast<int16_t>(pl::kX + (pl::kW - dw) / 2), pl::kDigitsY,
+                FontSize::Digits, pl::kColorDigits);
 }
 
 // [Prompt 10] Текст і колір статусу потоку за StreamStatus.
@@ -916,26 +923,54 @@ FontSize fitBandValue(int v, bool selected, char* out, size_t cap) {
     return FontSize::Tiny;
 }
 
+// [S2c2a] Підпис вибраної смуги в показнику: «125 Гц», «1 кГц», «2.8 кГц» (десяткова ТОЧКА, як у підписах колонок).
+void formatBandCaption(uint16_t hz, char* out, size_t cap) {
+    if (hz < 1000u)            snprintf(out, cap, "%u%s", static_cast<unsigned>(hz), eqc::kUnitHz);
+    else if (hz % 1000u == 0u) snprintf(out, cap, "%u%s", static_cast<unsigned>(hz / 1000u), eqc::kUnitKhz);
+    else                       snprintf(out, cap, "%u.%u%s", static_cast<unsigned>(hz / 1000u),
+                                        static_cast<unsigned>((hz % 1000u) / 100u), eqc::kUnitKhz);
+}
+
+// [S2c2a] Екран «EQ + Balance» на всю панель 320×240: шапка-смуга (заголовок й назва активного входу), показник
+// вибраного параметра (підпис ліворуч, значення в дБ праворуч), стовпчики від нульової лінії, підписи внизу.
 void drawEqBalance(const AppStateData& s) {
-    // --- Шапка: заголовок ліворуч, назва активного входу праворуч (обрізається, щоб не налізти).
-    const char* title = "EQ + Balance";
-    D::drawText(title, c::kMargin, eqc::kHeaderTitleY, FontSize::Small, dc::kColorFg);
-    const int32_t titleW = UiFonts::textWidth(title, FontSize::Small);
+    // Вибраний індекс захищаємо: поза діапазоном — перша смуга (логіка AppController не має такого стану).
+    const uint8_t sel = (s.eqSelected < eqc::kColumnCount) ? s.eqSelected : 0;
+    const bool selIsBal = (sel == eqc::kBalanceColumn);
+
+    // --- Шапка-смуга: заголовок ліворуч, назва активного входу праворуч (обрізається, щоб не налізти).
+    D::fillRect(0, 0, eqc::kPanelW, eqc::kHeaderH, eqc::kColorHeaderBg);
+    D::drawText(eqc::kTitleText, eqc::kHeaderPadX, eqc::kHeaderTitleY, FontSize::Small, eqc::kColorHeaderTitle);
+    const int32_t titleW = UiFonts::textWidth(eqc::kTitleText, FontSize::Small);
     char name[kInputFitCap];
-    const int32_t nameMaxW = c::kW - 2 * c::kMargin - titleW - eqc::kHeaderNameGap;
+    const int32_t nameMaxW = eqc::kPanelW - 2 * eqc::kHeaderPadX - titleW - eqc::kHeaderNameGap;
     if (nameMaxW > 0) {
         fitText(inputName(s), name, sizeof(name), FontSize::Small, nameMaxW);
         const int32_t nameW = UiFonts::textWidth(name, FontSize::Small);
-        D::drawText(name, static_cast<int16_t>(c::kW - c::kMargin - nameW), eqc::kHeaderTitleY,
+        D::drawText(name, static_cast<int16_t>(eqc::kPanelW - eqc::kHeaderPadX - nameW), eqc::kHeaderTitleY,
                     FontSize::Small, eqc::kColorHeaderName);
     }
-    D::drawLine(0, eqc::kHeaderLineY, c::kW - 1, eqc::kHeaderLineY, c::kColorDim);
+    D::drawLine(0, eqc::kHeaderLineY, static_cast<int16_t>(eqc::kPanelW - 1), eqc::kHeaderLineY,
+                eqc::kColorHeaderLine);
 
-    // Вибраний індекс захищаємо: поза діапазоном — перша смуга (логіка AppController не має такого стану).
-    const uint8_t sel = (s.eqSelected < eqc::kColumnCount) ? s.eqSelected : 0;
+    // --- Показник вибраного параметра: підпис (частота / «Баланс») і значення в дБ.
+    char cap[20];
+    if (selIsBal) strlcpy(cap, eqc::kBalanceCaption, sizeof(cap));
+    else          formatBandCaption(eq_cfg::kBandFreqHz[sel], cap, sizeof(cap));
+    const int selValue = selIsBal ? s.balanceDb : s.eqGainsDb[sel];
+    char num[8];
+    formatSignedDb(selValue, num, sizeof(num));
+    char valTxt[20];
+    snprintf(valTxt, sizeof(valTxt), "%s%s", num, eqc::kUnitDb);
+    const int32_t valW = UiFonts::textWidth(valTxt, FontSize::XLarge);
+    const int32_t capW = UiFonts::textWidth(cap, FontSize::Large);
+    D::drawText(valTxt, static_cast<int16_t>(eqc::kPanelW - eqc::kReadoutPadX - valW), eqc::kReadoutY,
+                FontSize::XLarge, selIsBal ? eqc::kColorBalBar : eqc::kColorEqBar);
+    if (eqc::kReadoutPadX + capW + eqc::kReadoutMinGap + valW <= eqc::kPanelW - eqc::kReadoutPadX) {   // значення важливіше за підпис
+        D::drawText(cap, eqc::kReadoutPadX, eqc::kReadoutCaptionY, FontSize::Large, eqc::kColorReadoutCaption);
+    }
 
     // --- Підсвітка вибраної колонки (під стовпчиками, над фоном).
-    const bool selIsBal = (sel == eqc::kBalanceColumn);
     D::fillRect(eqc::colX(sel), eqc::kAreaTop, eqc::kColW, static_cast<int16_t>(eqc::kAreaBottom - eqc::kAreaTop),
                 selIsBal ? eqc::kColorBalSel : eqc::kColorEqSel);
 
@@ -968,23 +1003,23 @@ void drawEqBalance(const AppStateData& s) {
 
         // --- Значення: над кінцем додатного (і над нульовою лінією для 0), під кінцем від'ємного.
         char val[8];
-        const FontSize valFont = fitBandValue(value, selected, val, sizeof(val));   // [E4] за шириною колонки
+        const FontSize valFont = fitBandValue(value, selected, val, sizeof(val));   // кегль і знак за шириною колонки
         const int16_t  valH    = (valFont == FontSize::Small) ? eqc::kValueSmallPx : eqc::kValueTinyPx;
         const uint16_t valColor = isBal ? (selected ? eqc::kColorBalBar : eqc::kColorBalValue)
                                         : (selected ? eqc::kColorValueSel : eqc::kColorValueDim);
-        const int32_t valW = UiFonts::textWidth(val, valFont);
-        const int16_t valX = static_cast<int16_t>(colX + (eqc::kColW - valW) / 2);
+        const int32_t valTw = UiFonts::textWidth(val, valFont);
+        const int16_t valX = static_cast<int16_t>(colX + (eqc::kColW - valTw) / 2);
         const int16_t valY = (value < 0) ? static_cast<int16_t>(eqc::kZeroY + h + eqc::kValueGap)
                                          : static_cast<int16_t>(eqc::kZeroY - h - eqc::kValueGap - valH);
         D::drawText(val, valX, valY, valFont, valColor);
     }
 
-    // --- Підписи внизу: частоти смуг і «Bal».
+    // --- Підписи внизу: частоти смуг і «Бал».
     for (uint8_t i = 0; i < eqc::kColumnCount; ++i) {
         const bool isBal    = (i == eqc::kBalanceColumn);
         const bool selected = (i == sel);
         char label[12];
-        if (isBal) snprintf(label, sizeof(label), "Bal");
+        if (isBal) strlcpy(label, eqc::kBalanceLabel, sizeof(label));
         else       formatBandLabel(eq_cfg::kBandFreqHz[i], label, sizeof(label));
         const uint16_t labelColor = selected ? eqc::kColorLabelSel
                                              : (isBal ? eqc::kColorBalValue : eqc::kColorLabelDim);
@@ -1108,6 +1143,8 @@ bool frame() {
 
     // [S2c1] Основний екран = Radio / ExternalInput (не під час «тихого» перезапуску): 240 рядків, решта — 170.
     const bool mainScreen = !s.restarting && (s.mode == Mode::Radio || s.mode == Mode::ExternalInput);
+    // [S2c2a] Екран EQ + Balance теж виводиться на всю панель 320×240 (решта меню лишається у 170 рядках до S2c2b).
+    const bool eqScreen = !s.restarting && s.mode == Mode::Menu && s.menuContext == MenuContext::EqBalance;
 
     // full — потрібен повний вивід кадру (змінилось щось поза VU / marquee); інакше лише рядки [rowMin, rowMax).
     bool full = !s_havePrev || memcmp(&s, &s_prev, sizeof(s)) != 0;
@@ -1231,7 +1268,7 @@ bool frame() {
 
     if (!full && rowMax < 0) return false;   // панель лишається як була
 
-    D::setFullPanel(mainScreen);              // [S2c1] 240 рядків для основного екрана, 170 для решти
+    D::setFullPanel(mainScreen || eqScreen);   // [S2c1] 240 рядків для основного екрана, [S2c2a] і для EQ + Balance; 170 для решти
     D::fillScreen(dc::kColorBg);
     if (s.restarting) {  // [Prompt 28] «тихий» перезапуск: один рядок замість будь-якого екрана
         drawPlaceholder("Restarting...");  // три крапки ASCII: U+2026 немає у шрифті

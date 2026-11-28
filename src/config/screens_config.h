@@ -1,6 +1,8 @@
 #pragma once
 
 // Константи модуля ui/screens (розкладка 320×170, кольори, marquee, standby).
+// [S2c2a] Спливне вікно параметра звуку (Гучність / Баланс) — namespace screens_cfg::popup_layout (320×240, внизу файлу);
+// угорі лишився лише kPopupTimeoutMs. Екран EQ + Balance — config/eq_screen_config.h.
 // [S2c1] Основний екран (Radio / ExternalInput) — namespace screens_cfg::main_layout (320×240);
 // константи Radio / ExternalInput / VU / верхньої смуги вище (kTop*, kNet*, kStation*, kTrack*, kVu*,
 // kExt*) з S2c1 НЕ використовуються й лишені для сумісності static_assert (прибрати в S2c2).
@@ -143,35 +145,10 @@ constexpr uint8_t kColorInputNameCount = sizeof(kColorInputName) / sizeof(kColor
 constexpr int16_t kStatusLineY = 143;
 constexpr int16_t kStatusY     = 148;              // Small: ціль зліва, значення справа
 
-// --- [Prompt 32] Спливне вікно параметра звуку (Vol/Bass/Treble/Bal/Gain) ---
-// Малюється ОСТАННІМ шаром поверх Radio/ExternalInput; центр екрана. Рамка — прямокутна
-// (DisplayManager не має заокруглених примітивів). Статус-рядок (kStatusLineY/kStatusY) більше не
-// малюється; константи лишено, щоб не чіпати static_assert нижче й зберегти розкладку для наступних кроків.
+// --- [Prompt 32] Спливне вікно параметра звуку: таймаут показу ---
+// [S2c2a] Геометрія, кольори й підписи вікна переїхали в screens_cfg::popup_layout (320×240, внизу файлу).
+// Вікно малюється ОСТАННІМ шаром поверх Radio / ExternalInput.
 constexpr uint32_t kPopupTimeoutMs = 5000;       // після ОСТАННЬОЇ події, що показує вікно
-constexpr uint8_t  kPopupMaxChars  = 3;          // найширше значення: "100", "+20", "-20"
-// Метрики шрифту FontSize::Digits (em=112, DejaVu Sans; вивід tools/gen_digits_font.py):
-constexpr int16_t  kPopupDigitsCellW    = 71;    // xAdvance цифри (моноширинний)
-constexpr int16_t  kPopupDigitsInkH     = 86;    // висота цифри (піксельних рядків)
-// Виміряно на залізі (P32, фото): LovyanGFX ставить верх цифри на верх рядка шрифту, тож відступ 0.
-constexpr int16_t  kPopupDigitsTopInset = 0;     // від верху рядка шрифту до верху цифри
-constexpr int16_t  kPopupDigitsDy       = 0;     // ручна підгонка вертикалі цифр (див. «Як перевірити»)
-constexpr int16_t  kPopupBorder    = 2;
-constexpr int16_t  kPopupPadX      = 16;
-constexpr int16_t  kPopupPadTop    = 4;
-constexpr int16_t  kPopupLabelGap  = 2;          // між підписом (Large) і цифрами
-constexpr int16_t  kPopupPadBottom = 6;
-constexpr int16_t  kPopupW = kPopupMaxChars * kPopupDigitsCellW + 2 * kPopupPadX + 2 * kPopupBorder;
-constexpr int16_t  kPopupH = kPopupBorder + kPopupPadTop + display_cfg::kFontLargePx +
-                             kPopupLabelGap + kPopupDigitsInkH + kPopupPadBottom + kPopupBorder;
-constexpr int16_t  kPopupX = (kW - kPopupW) / 2;
-constexpr int16_t  kPopupY = (kH - kPopupH) / 2;
-constexpr int16_t  kPopupLabelY  = kPopupY + kPopupBorder + kPopupPadTop;
-constexpr int16_t  kPopupDigitsY = kPopupLabelY + display_cfg::kFontLargePx + kPopupLabelGap -
-                                   kPopupDigitsTopInset + kPopupDigitsDy;   // верх рядка шрифту цифр
-constexpr uint16_t kColorPopupBg     = display_cfg::rgb565(12, 12, 20);
-constexpr uint16_t kColorPopupBorder = display_cfg::kColorYellow;
-constexpr uint16_t kColorPopupLabel  = display_cfg::kColorWhite;
-constexpr uint16_t kColorPopupDigits = display_cfg::kColorYellow;
 
 // --- Список станцій ---
 constexpr int16_t kListTitleY   = 4;               // Small
@@ -242,10 +219,6 @@ static_assert(kOtaTitleY + display_cfg::kFontLargePx < kOtaPercentY &&
                   kOtaHintY + display_cfg::kFontSmallPx <= kH,
               "OtaUpdate layout overlaps or leaves the screen");
 static_assert(kMarqueeStepMs > 0 && kMarqueeStepPx > 0, "marquee step must be positive");
-static_assert(kPopupW <= kW - 2 * kMargin, "popup is wider than the content area");
-static_assert(kPopupH * 4 <= kH * 3, "popup is taller than 3/4 of the screen");
-static_assert(kPopupDigitsY + kPopupDigitsTopInset + kPopupDigitsInkH <= kPopupY + kPopupH - kPopupBorder,
-              "popup digits do not fit inside the frame");
 static_assert(kPopupTimeoutMs > 0, "kPopupTimeoutMs must be > 0");
 static_assert(kVuSegW >= 2 && kVuSegGap >= 1 && kVuLabelX + 12 <= kW - 4,
               "VU bars do not fit into the screen width");
@@ -408,5 +381,53 @@ static_assert(kVuPeakHoldMs > 0 && kVuPeakFallMs > 0, "VU peak timings must be p
 static_assert(kClockPollMs > 0 && kWeatherPollMs > 0 && kWeatherStaleMs > 0, "poll / stale intervals must be positive");
 
 }  // namespace main_layout
+
+// ---------------------------------------------------------------------------
+// [S2c2a] СПЛИВНЕ ВІКНО ПАРАМЕТРА ЗВУКУ на панелі 320×240 (Гучність / Баланс).
+// Малюється останнім шаром поверх основного екрана (він виводиться на ВСЮ панель), по центру панелі.
+// Рамка прямокутна (DisplayManager не має заокруглених примітивів). Числа — FontSize::Digits (моноширинні
+// цифри 71 px; три знаки «100» / «+20» влазять із запасом), підпис — Large. Палітра — з main_layout.
+// ---------------------------------------------------------------------------
+namespace popup_layout {
+
+namespace ml = main_layout;
+
+constexpr int16_t kPanelW = display_cfg::kPanelW;   // 320
+constexpr int16_t kPanelH = display_cfg::kPanelH;   // 240
+
+constexpr uint8_t kMaxChars = 3;                    // найширше значення: "100", "+20", "-20"
+// Метрики шрифту FontSize::Digits (em = 112, DejaVu Sans; вивід tools/gen_digits_font.py; виміряно на залізі, P32):
+constexpr int16_t kDigitsCellW    = 71;             // xAdvance цифри (моноширинний)
+constexpr int16_t kDigitsInkH     = 86;             // висота цифри (піксельних рядків)
+constexpr int16_t kDigitsTopInset = 0;              // від верху рядка шрифту до верху цифри
+constexpr int16_t kDigitsDy       = 0;              // ручна підгонка вертикалі цифр
+
+constexpr int16_t kBorder    = 3;
+constexpr int16_t kPadX      = 20;
+constexpr int16_t kPadTop    = 10;
+constexpr int16_t kLabelGap  = 6;                   // між підписом (Large) і цифрами
+constexpr int16_t kPadBottom = 12;
+
+constexpr int16_t kW = kMaxChars * kDigitsCellW + 2 * kPadX + 2 * kBorder;
+constexpr int16_t kH = kBorder + kPadTop + display_cfg::kFontLargePx + kLabelGap + kDigitsInkH + kPadBottom + kBorder;
+constexpr int16_t kX = (kPanelW - kW) / 2;
+constexpr int16_t kY = (kPanelH - kH) / 2;
+constexpr int16_t kLabelY  = kY + kBorder + kPadTop;
+constexpr int16_t kDigitsY = kLabelY + display_cfg::kFontLargePx + kLabelGap - kDigitsTopInset + kDigitsDy;   // верх рядка шрифту цифр
+
+constexpr const char* kLabelVolume  = "Гучність";
+constexpr const char* kLabelBalance = "Баланс";
+
+constexpr uint16_t kColorBg     = ml::kColorStatusBg;
+constexpr uint16_t kColorBorder = ml::kColorAmber;
+constexpr uint16_t kColorLabel  = ml::kColorWxCity;
+constexpr uint16_t kColorDigits = ml::kColorAmber;
+
+static_assert(kW <= kPanelW - 2 * ml::kSideMargin, "popup is wider than the content area");
+static_assert(kH * 4 <= kPanelH * 3, "popup is taller than 3/4 of the panel");
+static_assert(kDigitsY + kDigitsTopInset + kDigitsInkH <= kY + kH - kBorder, "popup digits do not fit inside the frame");
+static_assert(kX >= 0 && kY >= 0 && kX + kW <= kPanelW && kY + kH <= kPanelH, "popup leaves the panel");
+
+}  // namespace popup_layout
 
 }  // namespace screens_cfg
